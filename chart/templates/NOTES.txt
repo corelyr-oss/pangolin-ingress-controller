@@ -1,0 +1,38 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named {{ .Release.Name }}.
+
+The Pangolin Ingress Controller has been deployed to namespace: {{ .Release.Namespace }}
+
+To learn more about the release, try:
+
+  $ helm status {{ .Release.Name }} -n {{ .Release.Namespace }}
+  $ helm get all {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+{{- if not (eq .Values.pangolin.apiKey "YOUR_PANGOLIN_API_KEY_HERE") }}
+
+✓ Pangolin API key has been configured.
+{{- else }}
+
+⚠ WARNING: You are using the default placeholder API key!
+  Please update your API key by running:
+
+  $ helm upgrade {{ .Release.Name }} {{ .Chart.Name }} \
+      --set pangolin.apiKey=YOUR_ACTUAL_API_KEY \
+      -n {{ .Release.Namespace }}
+{{- end }}
+
+The controller is configured to watch for Ingress resources with class: {{ .Values.controller.ingressClass }}
+
+To create an Ingress using this controller, add this annotation to your Ingress:
+  ingressClassName: {{ .Values.controller.ingressClass }}
+
+{{- if .Values.service.enabled }}
+
+Metrics are available at:
+  Service: {{ include "pangolin-ingress-controller.fullname" . }}-metrics
+  Port: {{ .Values.service.port }}
+{{- end }}
+
+For more information, visit:
+  https://github.com/your-org/pangolin-ingress-controller

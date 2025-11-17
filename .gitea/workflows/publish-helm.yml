@@ -1,0 +1,202 @@
+name: Publish Helm Chart
+
+on:
+  push:
+    tags:
+      - 'chart-v*'
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Chart version to publish'
+        required: true
+        type: string
+
+env:
+  CHART_PATH: chart
+  REGISTRY: 172.16.40.6:3000
+
+jobs:
+  lint-and-validate:
+    runs-on: ubuntu-latest
+    container:
+      image: 172.16.40.6:3000/build/gitea-actions-builder:main
+      credentials:
+        username: ${{ gitea.actor }}
+        password: ${{ secrets.OCI_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Lint Helm chart
+        run: |
+          helm lint ${{ env.CHART_PATH }}
+
+      - name: Template Helm chart
+        run: |
+          echo "=== Templating with default values ==="
+          helm template pangolin-ingress-controller ${{ env.CHART_PATH }} > /tmp/default-manifest.yaml
+
+      - name: Validate Kubernetes manifests
+        run: |
+          CRD_SCHEMA="-schema-location default -schema-location https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
+          echo "=== Validating manifests ==="
+          kubeconform ${CRD_SCHEMA} -summary -output json /tmp/default-manifest.yaml
+
+      - name: Check Helm chart version
+        run: |
+          CHART_VERSION=$(grep '^version:' ${{ env.CHART_PATH }}/Chart.yaml | awk '{print $2}')
+          echo "Chart version: $CHART_VERSION"
+
+          # Check if version follows semver
+          if ! echo "$CHART_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$'; then
+            echo "Error: Chart version must follow semantic versioning"
+            exit 1
+          fi
+
+      - name: Upload rendered manifests
+        uses: actions/upload-artifact@v3
+        with:
+          name: helm-manifests
+          path: /tmp/*-manifest.yaml
+          retention-days: 7
+
+  publish-oci:
+    runs-on: ubuntu-latest
+    needs: [lint-and-validate]
+    container:
+      image: 172.16.40.6:3000/build/gitea-actions-builder:main
+      credentials:
+        username: ${{ gitea.actor }}
+        password: ${{ secrets.OCI_TOKEN }}
+    if: gitea.event_name == 'push' || gitea.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          if [ "${{ gitea.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION=${GITEA_REF#refs/tags/}
+            VERSION=${VERSION#chart-v}
+            VERSION=${VERSION#v}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Chart version: $VERSION"
+
+      - name: Update Chart version
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          sed -i "s/^version:.*/version: $VERSION/" ${{ env.CHART_PATH }}/Chart.yaml
+          cat ${{ env.CHART_PATH }}/Chart.yaml
+
+      - name: Prepare Helm config
+        shell: sh
+        run: |
+          CONFIG_DIR="${{ gitea.workspace }}/.docker"
+          mkdir -p "$CONFIG_DIR"
+          AUTH=$(echo -n "los:${{ secrets.OCI_TOKEN }}" | base64 -w0)
+          cat > "$CONFIG_DIR"/config.json <<EOF
+          {
+            "auths": {
+              "${{ env.REGISTRY }}": {
+                "auth": "${AUTH}"
+              }
+            }
+          }
+          EOF
+
+      - name: Log in to Gitea Container Registry (OCI)
+        run: |
+          echo "${{ secrets.OCI_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
+            --username "los" \
+            --password-stdin
+
+      - name: Package Helm chart
+        run: |
+          helm package ${{ env.CHART_PATH }} -d /tmp/helm-packages
+
+      - name: Push chart to Gitea OCI registry
+        run: |
+          REGISTRY="${{ env.REGISTRY }}"
+          REPO="${{ gitea.repository }}"
+          VERSION=${{ steps.version.outputs.version }}
+
+          helm push /tmp/helm-packages/pangolin-ingress-controller-${VERSION}.tgz oci://${REGISTRY}/${REPO}
+
+      - name: Log out from registry
+        if: always()
+        run: |
+          helm registry logout ${{ env.REGISTRY }}
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: [publish-oci]
+    container:
+      image: 172.16.40.6:3000/build/gitea-actions-builder:main
+      credentials:
+        username: ${{ gitea.actor }}
+        password: ${{ secrets.OCI_TOKEN }}
+    if: startsWith(gitea.ref, 'refs/tags/')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=${GITEA_REF#refs/tags/}
+          VERSION=${VERSION#chart-v}
+          VERSION=${VERSION#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update Chart version
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          sed -i "s/^version:.*/version: $VERSION/" ${{ env.CHART_PATH }}/Chart.yaml
+
+      - name: Package Helm chart
+        run: |
+          helm package ${{ env.CHART_PATH }} -d /tmp/helm-packages
+
+      - name: Generate release notes
+        run: |
+          cat > /tmp/release-notes.md << EOF
+          # Pangolin Ingress Controller Helm Chart v${{ steps.version.outputs.version }}
+
+          ## Installation
+
+          ### Using OCI Registry
+
+          \`\`\`bash
+          helm install pangolin-ingress-controller oci://${{ env.REGISTRY }}/${{ gitea.repository }}/pangolin-ingress-controller --version ${{ steps.version.outputs.version }}
+          \`\`\`
+
+          ## Quick Start
+
+          \`\`\`bash
+          # Install with default values
+          helm install pangolin-ingress-controller oci://${{ env.REGISTRY }}/${{ gitea.repository }}/pangolin-ingress-controller
+
+          # Install with custom values
+          helm install pangolin-ingress-controller oci://${{ env.REGISTRY }}/${{ gitea.repository }}/pangolin-ingress-controller -f my-values.yaml
+          \`\`\`
+
+          ## Documentation
+
+          - [Chart README](chart/README.md)
+          - [Values Documentation](chart/values.yaml)
+          EOF
+
+      - name: Upload Helm package as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: helm-chart-package
+          path: /tmp/helm-packages/*.tgz
+          retention-days: 90

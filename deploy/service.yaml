@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pangolin-ingress-controller-metrics
+  namespace: pangolin-system
+  labels:
+    app: pangolin-ingress-controller
+spec:
+  type: ClusterIP
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: metrics
+    protocol: TCP
+  selector:
+    app: pangolin-ingress-controller

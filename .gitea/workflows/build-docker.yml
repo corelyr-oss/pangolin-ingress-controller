@@ -1,0 +1,114 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+
+env:
+  REGISTRY: 172.16.40.6:3000
+  IMAGE_NAME: ${{ gitea.repository }}
+
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+
+      - name: Prepare Kaniko config
+        shell: sh
+        run: |
+          CONFIG_DIR="${{ gitea.workspace }}/.docker"
+          mkdir -p "$CONFIG_DIR"
+          AUTH=$(echo -n "los:${{ secrets.OCI_TOKEN }}" | base64 -w0)
+          cat > "$CONFIG_DIR"/config.json <<EOF
+          {
+            "auths": {
+              "${{ env.REGISTRY }}": {
+                "auth": "${AUTH}"
+              }
+            }
+          }
+          EOF
+          cat "$CONFIG_DIR"/config.json
+
+
+      - name: Determine image tags
+        id: tags
+        shell: sh
+        run: |
+          EVENT="${{ gitea.event_name }}"
+          REF="${{ gitea.ref }}"
+          TAGS=""
+
+
+          if [ "$EVENT" = "push" ] && [ "${REF#refs/heads/}" != "$REF" ]; then
+            BRANCH="${REF#refs/heads/}"
+            TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${BRANCH}"
+
+
+            if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+              TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            fi
+
+
+            SHORT_SHA=$(printf '%s' "${{ gitea.sha }}" | cut -c1-7)
+            TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${BRANCH}-${SHORT_SHA}"
+          fi
+
+
+          if [ "${REF#refs/tags/v}" != "$REF" ]; then
+            VERSION="${REF#refs/tags/v}"
+            TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${VERSION}"
+            TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
+
+
+            MAJOR_MINOR=$(printf '%s' "$VERSION" | cut -d. -f1,2)
+            TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR_MINOR}"
+
+
+            MAJOR=$(printf '%s' "$VERSION" | cut -d. -f1)
+            TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR}"
+          fi
+
+
+          if [ "$EVENT" = "pull_request" ]; then
+            TAGS="--no-push --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pr-${{ gitea.event.number }}"
+          fi
+
+
+          if [ -z "$TAGS" ]; then
+            echo "No destinations determined; building without push."
+            TAGS="--no-push"
+          fi
+
+
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "Image tags: $TAGS"
+
+
+      - name: Build and push with Kaniko
+        uses: docker://gcr.io/kaniko-project/executor:v1.23.2-debug
+        env:
+          DOCKER_CONFIG: ${{ gitea.workspace }}/.docker
+        with:
+          args: >-
+            --context=${{ gitea.workspace }}
+            --dockerfile=${{ gitea.workspace }}/Dockerfile
+            --cache=true
+            --cache-repo=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/cache
+            --compressed-caching=false
+            ${{ steps.tags.outputs.tags }}

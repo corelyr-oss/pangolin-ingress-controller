@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pangolin-ingress-controller
+  namespace: pangolin-system
+  labels:
+    app: pangolin-ingress-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pangolin-ingress-controller
+  template:
+    metadata:
+      labels:
+        app: pangolin-ingress-controller
+    spec:
+      serviceAccountName: pangolin-ingress-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+      - name: manager
+        image: pangolin-ingress-controller:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - /manager
+        args:
+        - --leader-elect
+        - --ingress-class=pangolin
+        - --metrics-bind-address=:8080
+        - --health-probe-bind-address=:8081
+        - --pangolin-base-url=https://api.pangolin.net
+        - --pangolin-api-key-secret=pangolin-api-key
+        - --pangolin-api-key-namespace=pangolin-system
+        env:
+        - name: PANGOLIN_BASE_URL
+          value: "https://api.pangolin.net"
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+      terminationGracePeriodSeconds: 10
