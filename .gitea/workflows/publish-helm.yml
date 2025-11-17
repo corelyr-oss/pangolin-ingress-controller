@@ -72,7 +72,7 @@ jobs:
       credentials:
         username: ${{ gitea.actor }}
         password: ${{ secrets.OCI_TOKEN }}
-    if: gitea.event_name == 'push' || gitea.event_name == 'workflow_dispatch'
+    if: startsWith(gitea.ref, 'refs/tags/chart-v') || gitea.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -83,11 +83,16 @@ jobs:
           if [ "${{ gitea.event_name }}" == "workflow_dispatch" ]; then
             VERSION="${{ inputs.version }}"
           else
-            VERSION=${GITEA_REF#refs/tags/}
+            REF="${{ gitea.ref }}"
+            VERSION=${REF#refs/tags/chart-v}
             VERSION=${VERSION#chart-v}
             VERSION=${VERSION#v}
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          if [ -z "$VERSION" ]; then
+            echo "Failed to derive chart version" >&2
+            exit 1
+          fi
           echo "Chart version: $VERSION"
 
       - name: Update Chart version
@@ -143,7 +148,7 @@ jobs:
       credentials:
         username: ${{ gitea.actor }}
         password: ${{ secrets.OCI_TOKEN }}
-    if: startsWith(gitea.ref, 'refs/tags/')
+    if: startsWith(gitea.ref, 'refs/tags/chart-v')
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -151,7 +156,8 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          VERSION=${GITEA_REF#refs/tags/}
+          REF="${{ gitea.ref }}"
+          VERSION=${REF#refs/tags/chart-v}
           VERSION=${VERSION#chart-v}
           VERSION=${VERSION#v}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
