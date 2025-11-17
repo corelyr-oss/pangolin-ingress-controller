@@ -15,13 +15,13 @@ on:
 
 env:
   CHART_PATH: chart
-  REGISTRY: 172.16.40.6:3000
+  REGISTRY: repository.tf
 
 jobs:
   lint-and-validate:
     runs-on: ubuntu-latest
     container:
-      image: 172.16.40.6:3000/build/gitea-actions-builder:main
+      image: repository.tf/build/gitea-actions-builder:main
       credentials:
         username: ${{ gitea.actor }}
         password: ${{ secrets.OCI_TOKEN }}
@@ -68,7 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint-and-validate]
     container:
-      image: 172.16.40.6:3000/build/gitea-actions-builder:main
+      image: repository.tf/build/gitea-actions-builder:main
       credentials:
         username: ${{ gitea.actor }}
         password: ${{ secrets.OCI_TOKEN }}
@@ -139,7 +139,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [publish-oci]
     container:
-      image: 172.16.40.6:3000/build/gitea-actions-builder:main
+      image: repository.tf/build/gitea-actions-builder:main
       credentials:
         username: ${{ gitea.actor }}
         password: ${{ secrets.OCI_TOKEN }}
