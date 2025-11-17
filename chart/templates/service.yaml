@@ -1,0 +1,22 @@
+{{- if .Values.service.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "pangolin-ingress-controller.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "pangolin-ingress-controller.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+  - name: metrics
+    port: {{ .Values.service.port }}
+    targetPort: metrics
+    protocol: TCP
+  selector:
+    {{- include "pangolin-ingress-controller.selectorLabels" . | nindent 4 }}
+{{- end }}

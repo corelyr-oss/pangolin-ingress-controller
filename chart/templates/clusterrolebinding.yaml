@@ -1,0 +1,16 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "pangolin-ingress-controller.fullname" . }}
+  labels:
+    {{- include "pangolin-ingress-controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "pangolin-ingress-controller.fullname" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "pangolin-ingress-controller.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

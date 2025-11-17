@@ -1,0 +1,8 @@
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: pangolin
+  annotations:
+    ingressclass.kubernetes.io/is-default-class: "false"
+spec:
+  controller: k8s.io/pangolin-ingress-controller
