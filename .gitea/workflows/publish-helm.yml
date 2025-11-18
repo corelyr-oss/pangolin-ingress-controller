@@ -133,7 +133,7 @@ jobs:
           REPO="${{ gitea.repository }}"
           VERSION=${{ steps.version.outputs.version }}
 
-          helm push /tmp/helm-packages/pangolin-ingress-controller-${VERSION}.tgz oci://${REGISTRY}/${REPO}
+          helm push /tmp/helm-packages/pangolin-ingress-controller-${VERSION}.tgz oci://${REGISTRY}/${REPO}/chart
 
       - name: Log out from registry
         if: always()
@@ -180,19 +180,19 @@ jobs:
 
           ### Using OCI Registry
 
-          \`\`\`bash
-          helm install pangolin-ingress-controller oci://${{ env.REGISTRY }}/${{ gitea.repository }}/pangolin-ingress-controller --version ${{ steps.version.outputs.version }}
-          \`\`\`
+          ```bash
+          helm install pangolin-ingress-controller oci://${{ env.REGISTRY }}/${{ gitea.repository }}/chart/pangolin-ingress-controller --version ${{ steps.version.outputs.version }}
+          ```
 
           ## Quick Start
 
-          \`\`\`bash
+          ```bash
           # Install with default values
-          helm install pangolin-ingress-controller oci://${{ env.REGISTRY }}/${{ gitea.repository }}/pangolin-ingress-controller
+          helm install pangolin-ingress-controller oci://${{ env.REGISTRY }}/${{ gitea.repository }}/chart/pangolin-ingress-controller
 
           # Install with custom values
-          helm install pangolin-ingress-controller oci://${{ env.REGISTRY }}/${{ gitea.repository }}/pangolin-ingress-controller -f my-values.yaml
-          \`\`\`
+          helm install pangolin-ingress-controller oci://${{ env.REGISTRY }}/${{ gitea.repository }}/chart/pangolin-ingress-controller -f my-values.yaml
+          ```
 
           ## Documentation
 
