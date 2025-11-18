@@ -35,8 +35,8 @@ The following table lists the configurable parameters of the Pangolin Ingress Co
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `replicaCount` | Number of controller replicas | `1` |
-| `image.repository` | Controller image repository | `pangolin-ingress-controller` |
-| `image.tag` | Controller image tag | `latest` |
+| `image.repository` | Controller image repository | `repository.tf/kubernetes/pangolin-ingress-controller` |
+| `image.tag` | Controller image tag | *(empty; falls back to chart appVersion)* |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `pangolin.baseUrl` | Pangolin API base URL | `https://api.pangolin.net` |
 | `pangolin.apiKey` | Pangolin API key (required) | `YOUR_PANGOLIN_API_KEY_HERE` |

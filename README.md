@@ -75,6 +75,16 @@ You should see the `pangolin-ingress-controller` pod running and the `pangolin` 
 
 📖 **For detailed setup instructions, see [SETUP.md](SETUP.md)**
 
+### Official Container Image
+
+The latest Pangolin Ingress Controller image is published to the internal registry:
+
+```bash
+docker pull repository.tf/kubernetes/pangolin-ingress-controller:latest
+```
+
+Helm installations use this registry path by default (see `chart/values.yaml`).
+
 ### Building from Source
 
 1. **Clone the repository:**
@@ -90,16 +100,16 @@ cd pangolin-ingress-controller
 make build
 ```
 
-3. **Build the Docker image:**
+3. **Build the Docker image (optional, if you need a custom build):**
 
 ```bash
-make docker-build IMG=your-registry/pangolin-ingress-controller:latest
+make docker-build IMG=repository.tf/kubernetes/pangolin-ingress-controller:dev
 ```
 
 4. **Push to your registry:**
 
 ```bash
-make docker-push IMG=your-registry/pangolin-ingress-controller:latest
+make docker-push IMG=repository.tf/kubernetes/pangolin-ingress-controller:dev
 ```
 
 5. **Deploy to cluster:**

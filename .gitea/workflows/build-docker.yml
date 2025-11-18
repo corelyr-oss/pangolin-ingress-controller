@@ -4,15 +4,17 @@ on:
   push:
     branches:
       - main
-      - master
-      - develop
     tags:
       - 'v*'
   pull_request:
     branches:
       - main
-      - master
-      - develop
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version to build'
+        required: true
+        type: string
 
 env:
   REGISTRY: 172.16.40.6:3000
@@ -49,6 +51,8 @@ jobs:
       - name: Determine image tags
         id: tags
         shell: sh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           EVENT="${{ gitea.event_name }}"
           REF="${{ gitea.ref }}"
@@ -79,6 +83,29 @@ jobs:
             MAJOR_MINOR=$(printf '%s' "$VERSION" | cut -d. -f1,2)
             TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR_MINOR}"
 
+
+            MAJOR=$(printf '%s' "$VERSION" | cut -d. -f1)
+            TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR}"
+          fi
+
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            if [ -z "$INPUT_VERSION" ]; then
+              echo "workflow_dispatch requires the 'version' input" >&2
+              exit 1
+            fi
+
+            VERSION_RAW="$INPUT_VERSION"
+            VERSION=${VERSION_RAW#v}
+
+            TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
+
+            if [ "$VERSION_RAW" != "$VERSION" ]; then
+              TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION_RAW}"
+            fi
+
+            MAJOR_MINOR=$(printf '%s' "$VERSION" | cut -d. -f1,2)
+            TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR_MINOR}"
 
             MAJOR=$(printf '%s' "$VERSION" | cut -d. -f1)
             TAGS="$TAGS --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR}"
