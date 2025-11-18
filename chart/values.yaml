@@ -18,8 +18,11 @@ fullnameOverride: ""
 pangolin:
   # Base URL for Pangolin API
   baseUrl: "https://api.pangolin.net"
-  # API key for Pangolin (required)
+  # API key for Pangolin (required if createSecret is true)
   apiKey: "YOUR_PANGOLIN_API_KEY_HERE"
+  # Create a new secret for the API key
+  # Set to false if you want to use an existing secret
+  createSecret: true
   # Name of the secret containing the API key
   apiKeySecretName: pangolin-api-key
   # Namespace where the API key secret is stored
