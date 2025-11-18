@@ -39,8 +39,10 @@ The following table lists the configurable parameters of the Pangolin Ingress Co
 | `image.tag` | Controller image tag | *(empty; falls back to chart appVersion)* |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `pangolin.baseUrl` | Pangolin API base URL | `https://api.pangolin.net` |
-| `pangolin.apiKey` | Pangolin API key (required) | `YOUR_PANGOLIN_API_KEY_HERE` |
+| `pangolin.apiKey` | Pangolin API key (required if createSecret is true) | `YOUR_PANGOLIN_API_KEY_HERE` |
+| `pangolin.createSecret` | Create a new secret for the API key | `true` |
 | `pangolin.apiKeySecretName` | Name of secret containing API key | `pangolin-api-key` |
+| `pangolin.apiKeyNamespace` | Namespace where the API key secret is stored | *(empty; defaults to release namespace)* |
 | `controller.ingressClass` | Ingress class name | `pangolin` |
 | `controller.leaderElect` | Enable leader election | `true` |
 | `ingressClass.enabled` | Create IngressClass resource | `true` |
@@ -101,6 +103,23 @@ helm install pangolin-ingress-controller ./chart \
   --namespace pangolin-system \
   --set pangolin.apiKey=YOUR_API_KEY \
   --set ingressClass.isDefault=true
+```
+
+### Use an existing secret for the API key
+
+If you already have a secret containing your Pangolin API key, you can reference it instead of creating a new one:
+
+```bash
+# First, create your secret manually
+kubectl create secret generic my-pangolin-secret \
+  --from-literal=api-key=YOUR_API_KEY \
+  --namespace pangolin-system
+
+# Then install the chart referencing the existing secret
+helm install pangolin-ingress-controller ./chart \
+  --namespace pangolin-system \
+  --set pangolin.createSecret=false \
+  --set pangolin.apiKeySecretName=my-pangolin-secret
 ```
 
 ## Troubleshooting
