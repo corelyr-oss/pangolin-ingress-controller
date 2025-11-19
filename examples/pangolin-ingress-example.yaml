@@ -45,7 +45,7 @@ metadata:
 spec:
   ingressClassName: pangolin
   rules:
-  - host: example.yourdomain.com
+  - host: example.tunnel.tf
     http:
       paths:
       - path: /

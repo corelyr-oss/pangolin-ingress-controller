@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,6 +34,8 @@ func main() {
 	var pangolinBaseURL string
 	var pangolinAPIKeySecret string
 	var pangolinAPIKeyNamespace string
+	var pangolinOrgID string
+	var pangolinSiteNiceID string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -40,9 +43,11 @@ func main() {
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.StringVar(&ingressClass, "ingress-class", "pangolin", "The ingress class this controller manages.")
-	flag.StringVar(&pangolinBaseURL, "pangolin-base-url", "https://api.pangolin.net", "The base URL for the Pangolin API.")
+	flag.StringVar(&pangolinBaseURL, "pangolin-base-url", "https://api.tunnel.tf", "The base URL for the Pangolin API.")
 	flag.StringVar(&pangolinAPIKeySecret, "pangolin-api-key-secret", "pangolin-api-key", "The name of the secret containing the Pangolin API key.")
 	flag.StringVar(&pangolinAPIKeyNamespace, "pangolin-api-key-namespace", "pangolin-system", "The namespace of the secret containing the Pangolin API key.")
+	flag.StringVar(&pangolinOrgID, "pangolin-org-id", "", "The organization identifier in Pangolin.")
+	flag.StringVar(&pangolinSiteNiceID, "pangolin-site-nice-id", "", "The Pangolin site nice ID to attach resources/targets to.")
 
 	opts := zap.Options{
 		Development: true,
@@ -64,6 +69,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	if pangolinOrgID == "" {
+		setupLog.Error(fmt.Errorf("missing pangolin org id"), "pangolin org id must be configured via --pangolin-org-id")
+		os.Exit(1)
+	}
+	if pangolinSiteNiceID == "" {
+		setupLog.Error(fmt.Errorf("missing pangolin site nice id"), "pangolin site nice id must be configured via --pangolin-site-nice-id")
+		os.Exit(1)
+	}
+
 	if err = (&controller.IngressReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
@@ -71,6 +85,8 @@ func main() {
 		PangolinBaseURL: pangolinBaseURL,
 		APIKeySecret:    pangolinAPIKeySecret,
 		APIKeyNamespace: pangolinAPIKeyNamespace,
+		OrgID:           pangolinOrgID,
+		SiteNiceID:      pangolinSiteNiceID,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Ingress")
 		os.Exit(1)

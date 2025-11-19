@@ -221,21 +221,40 @@ The controller accepts the following command-line arguments:
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--ingress-class` | `pangolin` | The IngressClass this controller manages |
-| `--pangolin-base-url` | `https://api.pangolin.net` | Pangolin API base URL |
+| `--pangolin-base-url` | `https://api.tunnel.tf` | Pangolin API base URL |
 | `--pangolin-api-key-secret` | `pangolin-api-key` | Name of the secret containing the API key |
 | `--pangolin-api-key-namespace` | `pangolin-system` | Namespace of the API key secret |
+| `--pangolin-org-id` | _none_ | **Required** Pangolin organization identifier (e.g. `tunnel-tf`) |
+| `--pangolin-site-nice-id` | _none_ | **Required** Pangolin site nice ID that should host created targets |
 | `--metrics-bind-address` | `:8080` | Address for Prometheus metrics endpoint |
 | `--health-probe-bind-address` | `:8081` | Address for health/readiness probes |
 | `--leader-elect` | `false` | Enable leader election for HA |
 
 ### Self-Hosted Pangolin
 
-If you're using a self-hosted Pangolin instance, update the base URL in `deploy/deployment.yaml`:
+If you're using a self-hosted Pangolin instance, update the base URL (and optionally org/site IDs) in `deploy/deployment.yaml`:
 
 ```yaml
 args:
 - --pangolin-base-url=https://api.your-domain.com
+- --pangolin-org-id=your-org
+- --pangolin-site-nice-id=your-site
 ```
+
+### Helm Values
+
+When installing via Helm (`chart/values.yaml`), set the following:
+
+```yaml
+pangolin:
+  baseUrl: https://api.tunnel.tf
+  apiKeySecretName: pangolin-api-key
+  apiKeyNamespace: pangolin-system
+  orgId: tunnel-tf
+  siteNiceId: decent-giant-pangolin
+```
+
+If `pangolin.createSecret=true`, also set `pangolin.apiKey` before installing so Helm can populate the secret. Otherwise, create your secret manually and set `createSecret=false`.
 
 ## Monitoring
 
