@@ -3,7 +3,7 @@ name: pangolin-ingress-controller
 description: A Kubernetes Ingress Controller for Pangolin API Gateway
 type: application
 version: 0.1.0
-appVersion: "0.0.1"
+appVersion: "0.0.2"
 keywords:
   - ingress
   - pangolin
