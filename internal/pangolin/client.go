@@ -18,18 +18,25 @@ const (
 type Client struct {
 	baseURL    string
 	apiKey     string
+	orgID      string
 	httpClient *http.Client
 }
 
 // NewClient creates a new Pangolin API client
-func NewClient(baseURL, apiKey string) *Client {
+func NewClient(baseURL, apiKey, orgID string) *Client {
 	return &Client{
 		baseURL: baseURL,
 		apiKey:  apiKey,
+		orgID:   orgID,
 		httpClient: &http.Client{
 			Timeout: defaultTimeout,
 		},
 	}
+}
+
+// OrgID returns the configured Pangolin organization identifier
+func (c *Client) OrgID() string {
+	return c.orgID
 }
 
 // doRequest performs an HTTP request with authentication

@@ -3,6 +3,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -32,6 +35,12 @@ type IngressReconciler struct {
 	PangolinBaseURL string
 	APIKeySecret    string
 	APIKeyNamespace string
+	OrgID           string
+	SiteNiceID      string
+	domainMu        sync.RWMutex
+	domainMap       map[string]string
+	siteMu          sync.RWMutex
+	siteCache       *pangolin.Site
 }
 
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;update;patch
@@ -201,69 +210,38 @@ func (r *IngressReconciler) processIngressRules(ctx context.Context, ingress *ne
 func (r *IngressReconciler) updateIngressStatus(ctx context.Context, ingress *networkingv1.Ingress) error {
 	log := log.FromContext(ctx)
 
-	// Get the resource ID from annotations
 	resourceID := ingress.Annotations[annotationResourceID]
 	if resourceID == "" {
 		log.V(1).Info("No resource ID found, skipping status update")
 		return nil
 	}
 
-	// Get the resource from Pangolin to retrieve site information
-	resource, err := r.PangolinClient.GetResource(ctx, resourceID)
-	if err != nil {
+	if _, err := r.PangolinClient.GetResource(ctx, resourceID); err != nil {
 		log.Error(err, "Failed to get Pangolin resource", "resourceID", resourceID)
 		return err
 	}
 
-	// Get proxy IP from site information
-	var proxyIP string
-	if resource.SiteID != "" {
-		site, err := r.PangolinClient.GetSite(ctx, resource.SiteID)
-		if err != nil {
-			log.Error(err, "Failed to get site information", "siteID", resource.SiteID)
-			// Continue with empty IP rather than failing completely
-		} else {
-			proxyIP = site.ProxyIP
-		}
+	site, err := r.getSiteInfo(ctx)
+	if err != nil {
+		log.Error(err, "Failed to fetch site info for status update", "siteNiceID", r.SiteNiceID)
+		return err
 	}
 
-	// If no site ID or failed to get site, try to get default site
+	proxyIP := site.ProxyIP
 	if proxyIP == "" {
-		sites, err := r.PangolinClient.ListSites(ctx)
-		if err != nil {
-			log.Error(err, "Failed to list sites")
-			return err
-		}
-		// Use the first enabled site
-		for _, site := range sites {
-			if site.Enabled {
-				proxyIP = site.ProxyIP
-				break
-			}
-		}
-	}
-
-	if proxyIP == "" {
-		log.Info("No proxy IP available, skipping status update")
+		log.Info("Configured site has no proxy IP, skipping status update", "site", site.NiceID)
 		return nil
 	}
 
-	// Check if status needs updating
 	needsUpdate := false
 	if len(ingress.Status.LoadBalancer.Ingress) == 0 {
 		needsUpdate = true
-	} else if len(ingress.Status.LoadBalancer.Ingress) > 0 && ingress.Status.LoadBalancer.Ingress[0].IP != proxyIP {
+	} else if ingress.Status.LoadBalancer.Ingress[0].IP != proxyIP {
 		needsUpdate = true
 	}
 
 	if needsUpdate {
-		// Update the status with actual Pangolin proxy IP
-		ingress.Status.LoadBalancer.Ingress = []networkingv1.IngressLoadBalancerIngress{
-			{
-				IP: proxyIP,
-			},
-		}
-
+		ingress.Status.LoadBalancer.Ingress = []networkingv1.IngressLoadBalancerIngress{{IP: proxyIP}}
 		if err := r.Status().Update(ctx, ingress); err != nil {
 			log.Error(err, "Failed to update Ingress status")
 			return err
@@ -293,7 +271,7 @@ func (r *IngressReconciler) initPangolinClient(ctx context.Context) error {
 		return fmt.Errorf("api-key not found in secret %s/%s", r.APIKeyNamespace, r.APIKeySecret)
 	}
 
-	r.PangolinClient = pangolin.NewClient(r.PangolinBaseURL, string(apiKey))
+	r.PangolinClient = pangolin.NewClient(r.PangolinBaseURL, string(apiKey), r.OrgID)
 	log.Info("Initialized Pangolin client", "baseURL", r.PangolinBaseURL)
 
 	return nil
@@ -314,37 +292,51 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 	// Check if resource already exists (stored in annotation)
 	resourceID := ingress.Annotations[annotationResourceID]
 
-	// Prepare resource request
+	var err error
+
+	if domain == "" {
+		return fmt.Errorf("host %s is missing a registrable domain", host)
+	}
+
+	domainID, err := r.resolveDomainID(ctx, domain)
+	if err != nil {
+		log.Error(err, "Failed to resolve domain ID", "domain", domain)
+		return err
+	}
+
 	resourceReq := &pangolin.CreateResourceRequest{
-		Name:      resourceName,
-		Subdomain: subdomain,
-		Domain:    domain,
-		Type:      "http",
-		Enabled:   true,
-		Metadata: map[string]string{
-			"kubernetes.namespace": ingress.Namespace,
-			"kubernetes.ingress":   ingress.Name,
-			"kubernetes.host":      host,
-		},
+		Name:          resourceName,
+		Subdomain:     subdomain,
+		HTTP:          true,
+		Protocol:      "tcp",
+		DomainID:      domainID,
+		Enabled:       true,
+		StickySession: false,
+	}
+
+	updateReq := &pangolin.UpdateResourceRequest{
+		Name:          resourceName,
+		Subdomain:     subdomain,
+		DomainID:      domainID,
+		Enabled:       true,
+		StickySession: false,
 	}
 
 	var resource *pangolin.Resource
-	var err error
 
 	if resourceID != "" {
-		// Update existing resource
-		resource, err = r.PangolinClient.UpdateResource(ctx, resourceID, resourceReq)
+		resource, err = r.PangolinClient.UpdateResource(ctx, resourceID, updateReq)
 		if err != nil {
-			log.Error(err, "Failed to update Pangolin resource", "resourceID", resourceID)
-			return err
+			log.Error(err, "Failed to update Pangolin resource", "resourceID", resourceID, "subdomain", subdomain, "domain", domain, "host", host)
+			return fmt.Errorf("failed to update Pangolin resource %s: %w", resourceID, err)
 		}
 		log.Info("Updated Pangolin resource", "resourceID", resourceID, "name", resourceName)
 	} else {
 		// Create new resource
 		resource, err = r.PangolinClient.CreateResource(ctx, resourceReq)
 		if err != nil {
-			log.Error(err, "Failed to create Pangolin resource")
-			return err
+			log.Error(err, "Failed to create Pangolin resource", "subdomain", subdomain, "domain", domain, "host", host)
+			return fmt.Errorf("failed to create Pangolin resource for host %s: %w", host, err)
 		}
 		log.Info("Created Pangolin resource", "resourceID", resource.ID, "name", resourceName)
 
@@ -352,30 +344,37 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		if ingress.Annotations == nil {
 			ingress.Annotations = make(map[string]string)
 		}
-		ingress.Annotations[annotationResourceID] = resource.ID
+		resourceID = strconv.Itoa(resource.ID)
+		ingress.Annotations[annotationResourceID] = resourceID
 		if err := r.Update(ctx, ingress); err != nil {
 			return err
 		}
 	}
 
-	// Create target for the service
-	targetReq := &pangolin.CreateTargetRequest{
-		ResourceID: resource.ID,
-		Host:       fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, ingress.Namespace),
-		Port:       int(servicePort),
-		Method:     "http",
-		Weight:     100,
-		Enabled:    true,
-		Metadata: map[string]string{
-			"kubernetes.service": serviceName,
-			"kubernetes.port":    fmt.Sprintf("%d", servicePort),
-		},
+	site, err := r.getSiteInfo(ctx)
+	if err != nil {
+		log.Error(err, "Failed to resolve site for target creation", "siteNiceID", r.SiteNiceID)
+		return err
 	}
 
-	_, err = r.PangolinClient.CreateTarget(ctx, targetReq)
+	targetReq := &pangolin.CreateTargetRequest{
+		SiteID:        site.ID,
+		IP:            fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, ingress.Namespace),
+		Method:        "http",
+		Port:          int(servicePort),
+		Enabled:       true,
+		Path:          path.Path,
+		PathMatchType: pathTypeToMatch(path.PathType),
+	}
+
+	if targetReq.Path == "" {
+		targetReq.Path = "/"
+	}
+
+	_, err = r.PangolinClient.CreateTarget(ctx, resourceID, targetReq)
 	if err != nil {
-		log.Error(err, "Failed to create Pangolin target")
-		return err
+		log.Error(err, "Failed to create Pangolin target", "resourceID", resourceID, "service", serviceName, "port", servicePort)
+		return fmt.Errorf("failed to create Pangolin target for service %s:%d: %w", serviceName, servicePort, err)
 	}
 
 	log.Info("Created Pangolin target", "service", serviceName, "port", servicePort)
@@ -405,22 +404,93 @@ func (r *IngressReconciler) deletePangolinResources(ctx context.Context, ingress
 
 // parseHost parses a hostname into subdomain and domain
 func parseHost(host string) (subdomain, domain string) {
-	// Simple parsing: assume format is subdomain.domain.tld
-	// For production, use a proper domain parsing library
-	parts := []rune(host)
-	firstDot := -1
-	for i, r := range parts {
-		if r == '.' {
-			firstDot = i
-			break
-		}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", ""
 	}
-
-	if firstDot == -1 {
+	parts := strings.Split(host, ".")
+	if len(parts) < 2 {
 		return host, ""
 	}
+	domain = strings.Join(parts[len(parts)-2:], ".")
+	if len(parts) == 2 {
+		return "", domain
+	}
+	subdomain = strings.Join(parts[:len(parts)-2], ".")
+	return subdomain, domain
+}
 
-	return string(parts[:firstDot]), string(parts[firstDot+1:])
+func (r *IngressReconciler) getSiteInfo(ctx context.Context) (*pangolin.Site, error) {
+	if r.SiteNiceID == "" {
+		return nil, fmt.Errorf("pangolin site nice ID is not configured")
+	}
+	r.siteMu.RLock()
+	if r.siteCache != nil {
+		site := r.siteCache
+		r.siteMu.RUnlock()
+		return site, nil
+	}
+	r.siteMu.RUnlock()
+
+	site, err := r.PangolinClient.GetSiteByNiceID(ctx, r.SiteNiceID)
+	if err != nil {
+		return nil, err
+	}
+
+	r.siteMu.Lock()
+	r.siteCache = site
+	r.siteMu.Unlock()
+
+	return site, nil
+}
+
+func (r *IngressReconciler) resolveDomainID(ctx context.Context, baseDomain string) (string, error) {
+	r.domainMu.RLock()
+	if r.domainMap != nil {
+		if id, ok := r.domainMap[baseDomain]; ok {
+			r.domainMu.RUnlock()
+			return id, nil
+		}
+	}
+	r.domainMu.RUnlock()
+
+	domains, err := r.PangolinClient.ListDomains(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to list Pangolin domains: %w", err)
+	}
+
+	localMap := make(map[string]string, len(domains))
+	for _, d := range domains {
+		localMap[d.BaseDomain] = d.ID
+	}
+
+	r.domainMu.Lock()
+	if r.domainMap == nil {
+		r.domainMap = make(map[string]string, len(localMap))
+	}
+	for k, v := range localMap {
+		r.domainMap[k] = v
+	}
+	resolved, ok := r.domainMap[baseDomain]
+	r.domainMu.Unlock()
+	if !ok {
+		return "", fmt.Errorf("no Pangolin domain configured for %s", baseDomain)
+	}
+	return resolved, nil
+}
+
+func pathTypeToMatch(pt *networkingv1.PathType) string {
+	if pt == nil {
+		return "prefix"
+	}
+	switch *pt {
+	case networkingv1.PathTypeExact:
+		return "exact"
+	case networkingv1.PathTypeImplementationSpecific:
+		return "regex"
+	default:
+		return "prefix"
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager

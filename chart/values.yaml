@@ -17,7 +17,7 @@ fullnameOverride: ""
 # Pangolin API configuration
 pangolin:
   # Base URL for Pangolin API
-  baseUrl: "https://api.pangolin.net"
+  baseUrl: "https://api.tunnel.tf"
   # API key for Pangolin (required if createSecret is true)
   apiKey: "YOUR_PANGOLIN_API_KEY_HERE"
   # Create a new secret for the API key
@@ -27,6 +27,10 @@ pangolin:
   apiKeySecretName: pangolin-api-key
   # Namespace where the API key secret is stored
   apiKeyNamespace: ""  # defaults to release namespace
+  # Pangolin organization identifier
+  orgId: ""
+  # Site nice ID to place new targets/resources
+  siteNiceId: ""
 
 # Controller configuration
 controller:
