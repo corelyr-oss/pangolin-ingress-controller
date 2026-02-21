@@ -44,6 +44,7 @@ The following table lists the configurable parameters of the Pangolin Ingress Co
 | `pangolin.apiKeySecretName` | Name of secret containing API key | `pangolin-api-key` |
 | `pangolin.apiKeyNamespace` | Namespace where the API key secret is stored | *(empty; defaults to release namespace)* |
 | `controller.ingressClass` | Ingress class name | `pangolin` |
+| `controller.resourcePrefix` | Prefix for Pangolin resource names | `pangolin-controller` |
 | `controller.leaderElect` | Enable leader election | `true` |
 | `ingressClass.enabled` | Create IngressClass resource | `true` |
 | `ingressClass.isDefault` | Set as default ingress class | `false` |

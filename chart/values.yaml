@@ -36,6 +36,8 @@ pangolin:
 controller:
   # Ingress class name
   ingressClass: pangolin
+  # Prefix for Pangolin resource names
+  resourcePrefix: pangolin-controller
   # Enable leader election
   leaderElect: true
   # Metrics bind address

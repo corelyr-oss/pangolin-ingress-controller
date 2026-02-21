@@ -253,6 +253,31 @@ func (c *Client) CreateTarget(ctx context.Context, resourceID string, req *Creat
 	return &target, nil
 }
 
+// UpdateTarget updates an existing target by ID
+func (c *Client) UpdateTarget(ctx context.Context, targetID string, req *CreateTargetRequest) (*Target, error) {
+	resp, err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/v1/target/%s", targetID), req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := checkResponse(resp); err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var target Target
+	if err := decodeData(body, &target); err != nil {
+		return nil, err
+	}
+
+	return &target, nil
+}
+
 // ListTargets lists all targets for a resource
 func (c *Client) ListTargets(ctx context.Context, resourceID string) ([]Target, error) {
 	resp, err := c.doRequest(ctx, http.MethodGet, fmt.Sprintf("/v1/resource/%s/targets", resourceID), nil)

@@ -384,6 +384,7 @@ The controller accepts the following command-line arguments:
 | `--pangolin-api-key-namespace` | `pangolin-system` | Namespace of the API key secret |
 | `--pangolin-org-id` | _none_ | **Required** Pangolin organization identifier (e.g. `tunnel-tf`) |
 | `--pangolin-site-nice-id` | _none_ | **Required** Pangolin site nice ID that should host created targets |
+| `--resource-prefix` | `pangolin-controller` | Prefix for Pangolin resource names (resources are named `{prefix}-{namespace}-{name}-{subdomain}`) |
 | `--metrics-bind-address` | `:8080` | Address for Prometheus metrics endpoint |
 | `--health-probe-bind-address` | `:8081` | Address for health/readiness probes |
 | `--leader-elect` | `false` | Enable leader election for HA |

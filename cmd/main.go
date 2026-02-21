@@ -36,6 +36,7 @@ func main() {
 	var pangolinAPIKeyNamespace string
 	var pangolinOrgID string
 	var pangolinSiteNiceID string
+	var resourcePrefix string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -48,6 +49,7 @@ func main() {
 	flag.StringVar(&pangolinAPIKeyNamespace, "pangolin-api-key-namespace", "pangolin-system", "The namespace of the secret containing the Pangolin API key.")
 	flag.StringVar(&pangolinOrgID, "pangolin-org-id", "", "The organization identifier in Pangolin.")
 	flag.StringVar(&pangolinSiteNiceID, "pangolin-site-nice-id", "", "The Pangolin site nice ID to attach resources/targets to.")
+	flag.StringVar(&resourcePrefix, "resource-prefix", "pangolin-controller", "Prefix for Pangolin resource names.")
 
 	opts := zap.Options{
 		Development: true,
@@ -82,6 +84,7 @@ func main() {
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
 		IngressClass:    ingressClass,
+		ResourcePrefix:  resourcePrefix,
 		PangolinBaseURL: pangolinBaseURL,
 		APIKeySecret:    pangolinAPIKeySecret,
 		APIKeyNamespace: pangolinAPIKeyNamespace,

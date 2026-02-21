@@ -42,6 +42,14 @@ kind: Ingress
 metadata:
   name: example-ingress
   namespace: example-app
+  annotations:
+    pangolin.ingress.k8s.io/sso: "false"
+    pangolin.ingress.k8s.io/ssl: "true"
+    pangolin.ingress.k8s.io/sticky-session: "true"
+    pangolin.ingress.k8s.io/healthcheck-enabled: "true"
+    pangolin.ingress.k8s.io/healthcheck-path: "/"
+    pangolin.ingress.k8s.io/healthcheck-interval: "30"
+    pangolin.ingress.k8s.io/healthcheck-timeout: "5"
 spec:
   ingressClassName: pangolin
   rules:

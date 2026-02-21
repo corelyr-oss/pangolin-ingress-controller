@@ -65,6 +65,7 @@ type IngressReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	IngressClass    string
+	ResourcePrefix  string
 	PangolinClient  *pangolin.Client
 	PangolinBaseURL string
 	APIKeySecret    string
@@ -320,8 +321,12 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 	// In production, you'd want more sophisticated parsing
 	subdomain, domain := parseHost(host)
 
-	// Create resource name
-	resourceName := fmt.Sprintf("%s-%s-%s", ingress.Namespace, ingress.Name, subdomain)
+	// Create resource name with configurable prefix
+	prefix := r.ResourcePrefix
+	if prefix == "" {
+		prefix = "pangolin-controller"
+	}
+	resourceName := fmt.Sprintf("%s-%s-%s-%s", prefix, ingress.Namespace, ingress.Name, subdomain)
 
 	// Check if resource already exists (stored in annotation)
 	resourceID := ingress.Annotations[annotationResourceID]
@@ -416,13 +421,37 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		return err
 	}
 
+	targetIP := fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, ingress.Namespace)
+	targetPort := int(servicePort)
+	targetPath := path.Path
+	if targetPath == "" {
+		targetPath = "/"
+	}
+
+	// Check for existing targets to avoid duplicates on restarts
+	existingTargets, err := r.PangolinClient.ListTargets(ctx, resourceID)
+	if err != nil {
+		log.Error(err, "Failed to list existing targets", "resourceID", resourceID)
+		return fmt.Errorf("failed to list targets for resource %s: %w", resourceID, err)
+	}
+
+	// Look for a target that matches our site, IP, and port
+	var existingTarget *pangolin.Target
+	for i := range existingTargets {
+		t := &existingTargets[i]
+		if t.SiteID == site.ID && t.IP == targetIP && t.Port == targetPort {
+			existingTarget = t
+			break
+		}
+	}
+
 	targetReq := &pangolin.CreateTargetRequest{
 		SiteID:              site.ID,
-		IP:                  fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, ingress.Namespace),
+		IP:                  targetIP,
 		Method:              "http",
-		Port:                int(servicePort),
+		Port:                targetPort,
 		Enabled:             true,
-		Path:                path.Path,
+		Path:                targetPath,
 		PathMatchType:       pathTypeToMatch(path.PathType),
 		HCEnabled:           parseBoolAnnotation(annotations, annotationHCEnabled),
 		HCPath:              parseStringAnnotation(annotations, annotationHCPath),
@@ -440,17 +469,24 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		HCTLSServerName:     parseStringAnnotation(annotations, annotationHCTLSServerName),
 	}
 
-	if targetReq.Path == "" {
-		targetReq.Path = "/"
+	if existingTarget != nil {
+		// Target already exists — update it instead of creating a duplicate
+		targetIDStr := strconv.Itoa(existingTarget.ID)
+		_, err = r.PangolinClient.UpdateTarget(ctx, targetIDStr, targetReq)
+		if err != nil {
+			log.Error(err, "Failed to update Pangolin target", "targetID", targetIDStr, "resourceID", resourceID)
+			return fmt.Errorf("failed to update Pangolin target %s: %w", targetIDStr, err)
+		}
+		log.Info("Updated existing Pangolin target", "targetID", targetIDStr, "service", serviceName, "port", servicePort)
+	} else {
+		// No matching target — create a new one
+		_, err = r.PangolinClient.CreateTarget(ctx, resourceID, targetReq)
+		if err != nil {
+			log.Error(err, "Failed to create Pangolin target", "resourceID", resourceID, "service", serviceName, "port", servicePort)
+			return fmt.Errorf("failed to create Pangolin target for service %s:%d: %w", serviceName, servicePort, err)
+		}
+		log.Info("Created Pangolin target", "service", serviceName, "port", servicePort)
 	}
-
-	_, err = r.PangolinClient.CreateTarget(ctx, resourceID, targetReq)
-	if err != nil {
-		log.Error(err, "Failed to create Pangolin target", "resourceID", resourceID, "service", serviceName, "port", servicePort)
-		return fmt.Errorf("failed to create Pangolin target for service %s:%d: %w", serviceName, servicePort, err)
-	}
-
-	log.Info("Created Pangolin target", "service", serviceName, "port", servicePort)
 
 	return nil
 }
@@ -618,6 +654,9 @@ func parseHeadersAnnotation(annotations map[string]string, key string) []pangoli
 func (r *IngressReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkingv1.Ingress{}).
-		WithEventFilter(predicate.GenerationChangedPredicate{}).
+		WithEventFilter(predicate.Or(
+			predicate.GenerationChangedPredicate{},
+			predicate.AnnotationChangedPredicate{},
+		)).
 		Complete(r)
 }
