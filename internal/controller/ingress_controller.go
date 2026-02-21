@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -24,6 +25,39 @@ import (
 const (
 	pangolinFinalizerName = "pangolin.ingress.k8s.io/finalizer"
 	annotationResourceID  = "pangolin.ingress.k8s.io/resource-id"
+
+	// SSO / access control annotations
+	annotationSSO                   = "pangolin.ingress.k8s.io/sso"
+	annotationSSL                   = "pangolin.ingress.k8s.io/ssl"
+	annotationBlockAccess           = "pangolin.ingress.k8s.io/block-access"
+	annotationEmailWhitelistEnabled = "pangolin.ingress.k8s.io/email-whitelist-enabled"
+	annotationApplyRules            = "pangolin.ingress.k8s.io/apply-rules"
+
+	// Proxy settings annotations
+	annotationStickySession = "pangolin.ingress.k8s.io/sticky-session"
+	annotationTLSServerName = "pangolin.ingress.k8s.io/tls-server-name"
+	annotationSetHostHeader = "pangolin.ingress.k8s.io/set-host-header"
+	annotationHeaders       = "pangolin.ingress.k8s.io/headers"
+	annotationPostAuthPath  = "pangolin.ingress.k8s.io/post-auth-path"
+
+	// Resource enabled annotation
+	annotationEnabled = "pangolin.ingress.k8s.io/enabled"
+
+	// Health check annotations
+	annotationHCEnabled           = "pangolin.ingress.k8s.io/healthcheck-enabled"
+	annotationHCPath              = "pangolin.ingress.k8s.io/healthcheck-path"
+	annotationHCScheme            = "pangolin.ingress.k8s.io/healthcheck-scheme"
+	annotationHCMode              = "pangolin.ingress.k8s.io/healthcheck-mode"
+	annotationHCHostname          = "pangolin.ingress.k8s.io/healthcheck-hostname"
+	annotationHCPort              = "pangolin.ingress.k8s.io/healthcheck-port"
+	annotationHCInterval          = "pangolin.ingress.k8s.io/healthcheck-interval"
+	annotationHCUnhealthyInterval = "pangolin.ingress.k8s.io/healthcheck-unhealthy-interval"
+	annotationHCTimeout           = "pangolin.ingress.k8s.io/healthcheck-timeout"
+	annotationHCHeaders           = "pangolin.ingress.k8s.io/healthcheck-headers"
+	annotationHCFollowRedirects   = "pangolin.ingress.k8s.io/healthcheck-follow-redirects"
+	annotationHCMethod            = "pangolin.ingress.k8s.io/healthcheck-method"
+	annotationHCStatus            = "pangolin.ingress.k8s.io/healthcheck-status"
+	annotationHCTLSServerName     = "pangolin.ingress.k8s.io/healthcheck-tls-server-name"
 )
 
 // IngressReconciler reconciles an Ingress object
@@ -304,6 +338,11 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		return err
 	}
 
+	// Parse annotations for proxy and access control settings
+	annotations := ingress.Annotations
+	stickySession := parseBoolAnnotation(annotations, annotationStickySession)
+	postAuthPath := parseStringAnnotation(annotations, annotationPostAuthPath)
+
 	resourceReq := &pangolin.CreateResourceRequest{
 		Name:      resourceName,
 		Subdomain: subdomain,
@@ -311,13 +350,28 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		Protocol:  "tcp",
 		DomainID:  domainID,
 	}
+	if stickySession != nil && *stickySession {
+		resourceReq.StickySession = true
+	}
+	if postAuthPath != nil {
+		resourceReq.PostAuthPath = *postAuthPath
+	}
 
-	enabled := true
 	updateReq := &pangolin.UpdateResourceRequest{
-		Name:      resourceName,
-		Subdomain: subdomain,
-		DomainID:  domainID,
-		Enabled:   &enabled,
+		Name:                  resourceName,
+		Subdomain:             subdomain,
+		DomainID:              domainID,
+		Enabled:               parseBoolAnnotation(annotations, annotationEnabled),
+		SSO:                   parseBoolAnnotation(annotations, annotationSSO),
+		SSL:                   parseBoolAnnotation(annotations, annotationSSL),
+		BlockAccess:           parseBoolAnnotation(annotations, annotationBlockAccess),
+		EmailWhitelistEnabled: parseBoolAnnotation(annotations, annotationEmailWhitelistEnabled),
+		ApplyRules:            parseBoolAnnotation(annotations, annotationApplyRules),
+		StickySession:         stickySession,
+		TLSServerName:         parseStringAnnotation(annotations, annotationTLSServerName),
+		SetHostHeader:         parseStringAnnotation(annotations, annotationSetHostHeader),
+		PostAuthPath:          postAuthPath,
+		Headers:               parseHeadersAnnotation(annotations, annotationHeaders),
 	}
 
 	var resource *pangolin.Resource
@@ -347,6 +401,13 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		if err := r.Update(ctx, ingress); err != nil {
 			return err
 		}
+
+		// Apply update settings (SSO, SSL, etc.) to the newly created resource
+		resource, err = r.PangolinClient.UpdateResource(ctx, resourceID, updateReq)
+		if err != nil {
+			log.Error(err, "Failed to apply settings to new Pangolin resource", "resourceID", resourceID)
+			return fmt.Errorf("failed to apply settings to new Pangolin resource %s: %w", resourceID, err)
+		}
 	}
 
 	site, err := r.getSiteInfo(ctx)
@@ -356,13 +417,27 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 	}
 
 	targetReq := &pangolin.CreateTargetRequest{
-		SiteID:        site.ID,
-		IP:            fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, ingress.Namespace),
-		Method:        "http",
-		Port:          int(servicePort),
-		Enabled:       true,
-		Path:          path.Path,
-		PathMatchType: pathTypeToMatch(path.PathType),
+		SiteID:              site.ID,
+		IP:                  fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, ingress.Namespace),
+		Method:              "http",
+		Port:                int(servicePort),
+		Enabled:             true,
+		Path:                path.Path,
+		PathMatchType:       pathTypeToMatch(path.PathType),
+		HCEnabled:           parseBoolAnnotation(annotations, annotationHCEnabled),
+		HCPath:              parseStringAnnotation(annotations, annotationHCPath),
+		HCScheme:            parseStringAnnotation(annotations, annotationHCScheme),
+		HCMode:              parseStringAnnotation(annotations, annotationHCMode),
+		HCHostname:          parseStringAnnotation(annotations, annotationHCHostname),
+		HCPort:              parseIntAnnotation(annotations, annotationHCPort),
+		HCInterval:          parseIntAnnotation(annotations, annotationHCInterval),
+		HCUnhealthyInterval: parseIntAnnotation(annotations, annotationHCUnhealthyInterval),
+		HCTimeout:           parseIntAnnotation(annotations, annotationHCTimeout),
+		HCHeaders:           parseHeadersAnnotation(annotations, annotationHCHeaders),
+		HCFollowRedirects:   parseBoolAnnotation(annotations, annotationHCFollowRedirects),
+		HCMethod:            parseStringAnnotation(annotations, annotationHCMethod),
+		HCStatus:            parseIntAnnotation(annotations, annotationHCStatus),
+		HCTLSServerName:     parseStringAnnotation(annotations, annotationHCTLSServerName),
 	}
 
 	if targetReq.Path == "" {
@@ -489,6 +564,54 @@ func pathTypeToMatch(pt *networkingv1.PathType) string {
 	default:
 		return "prefix"
 	}
+}
+
+// parseBoolAnnotation returns a *bool from an annotation value, or nil if not set.
+func parseBoolAnnotation(annotations map[string]string, key string) *bool {
+	v, ok := annotations[key]
+	if !ok || v == "" {
+		return nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return nil
+	}
+	return &b
+}
+
+// parseStringAnnotation returns a *string from an annotation value, or nil if not set.
+func parseStringAnnotation(annotations map[string]string, key string) *string {
+	v, ok := annotations[key]
+	if !ok {
+		return nil
+	}
+	return &v
+}
+
+// parseIntAnnotation returns a *int from an annotation value, or nil if not set.
+func parseIntAnnotation(annotations map[string]string, key string) *int {
+	v, ok := annotations[key]
+	if !ok || v == "" {
+		return nil
+	}
+	i, err := strconv.Atoi(v)
+	if err != nil {
+		return nil
+	}
+	return &i
+}
+
+// parseHeadersAnnotation parses a JSON array of {"name":"...","value":"..."} objects from an annotation.
+func parseHeadersAnnotation(annotations map[string]string, key string) []pangolin.Header {
+	v, ok := annotations[key]
+	if !ok || v == "" {
+		return nil
+	}
+	var headers []pangolin.Header
+	if err := json.Unmarshal([]byte(v), &headers); err != nil {
+		return nil
+	}
+	return headers
 }
 
 // SetupWithManager sets up the controller with the Manager

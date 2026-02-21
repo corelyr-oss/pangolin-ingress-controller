@@ -46,27 +46,56 @@ type CreateResourceRequest struct {
 	PostAuthPath  string `json:"postAuthPath,omitempty"`
 }
 
+// Header represents a custom proxy header
+type Header struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 // UpdateResourceRequest represents the request to update a resource
 type UpdateResourceRequest struct {
-	Name          string `json:"name,omitempty"`
-	Subdomain     string `json:"subdomain,omitempty"`
-	DomainID      string `json:"domainId,omitempty"`
-	Enabled       *bool  `json:"enabled,omitempty"`
-	StickySession *bool  `json:"stickySession,omitempty"`
+	Name                  string   `json:"name,omitempty"`
+	Subdomain             string   `json:"subdomain,omitempty"`
+	DomainID              string   `json:"domainId,omitempty"`
+	Enabled               *bool    `json:"enabled,omitempty"`
+	SSO                   *bool    `json:"sso,omitempty"`
+	SSL                   *bool    `json:"ssl,omitempty"`
+	BlockAccess           *bool    `json:"blockAccess,omitempty"`
+	EmailWhitelistEnabled *bool    `json:"emailWhitelistEnabled,omitempty"`
+	ApplyRules            *bool    `json:"applyRules,omitempty"`
+	StickySession         *bool    `json:"stickySession,omitempty"`
+	TLSServerName         *string  `json:"tlsServerName,omitempty"`
+	SetHostHeader         *string  `json:"setHostHeader,omitempty"`
+	Headers               []Header `json:"headers,omitempty"`
+	PostAuthPath          *string  `json:"postAuthPath,omitempty"`
 }
 
 // CreateTargetRequest represents the request to create a target
 type CreateTargetRequest struct {
-	SiteID          int    `json:"siteId"`
-	IP              string `json:"ip"`
-	Method          string `json:"method,omitempty"`
-	Port            int    `json:"port"`
-	Enabled         bool   `json:"enabled"`
-	Path            string `json:"path,omitempty"`
-	PathMatchType   string `json:"pathMatchType,omitempty"`
-	RewritePath     string `json:"rewritePath,omitempty"`
-	RewritePathType string `json:"rewritePathType,omitempty"`
-	Priority        int    `json:"priority,omitempty"`
+	SiteID              int      `json:"siteId"`
+	IP                  string   `json:"ip"`
+	Method              string   `json:"method,omitempty"`
+	Port                int      `json:"port"`
+	Enabled             bool     `json:"enabled"`
+	Path                string   `json:"path,omitempty"`
+	PathMatchType       string   `json:"pathMatchType,omitempty"`
+	RewritePath         string   `json:"rewritePath,omitempty"`
+	RewritePathType     string   `json:"rewritePathType,omitempty"`
+	Priority            int      `json:"priority,omitempty"`
+	HCEnabled           *bool    `json:"hcEnabled,omitempty"`
+	HCPath              *string  `json:"hcPath,omitempty"`
+	HCScheme            *string  `json:"hcScheme,omitempty"`
+	HCMode              *string  `json:"hcMode,omitempty"`
+	HCHostname          *string  `json:"hcHostname,omitempty"`
+	HCPort              *int     `json:"hcPort,omitempty"`
+	HCInterval          *int     `json:"hcInterval,omitempty"`
+	HCUnhealthyInterval *int     `json:"hcUnhealthyInterval,omitempty"`
+	HCTimeout           *int     `json:"hcTimeout,omitempty"`
+	HCHeaders           []Header `json:"hcHeaders,omitempty"`
+	HCFollowRedirects   *bool    `json:"hcFollowRedirects,omitempty"`
+	HCMethod            *string  `json:"hcMethod,omitempty"`
+	HCStatus            *int     `json:"hcStatus,omitempty"`
+	HCTLSServerName     *string  `json:"hcTlsServerName,omitempty"`
 }
 
 // Site represents a Pangolin site (proxy location)

@@ -77,10 +77,10 @@ You should see the `pangolin-ingress-controller` pod running and the `pangolin` 
 
 ### Official Container Image
 
-The latest Pangolin Ingress Controller image is published to the internal registry:
+Multi-architecture images (amd64 and arm64) are published to GitHub Container Registry:
 
 ```bash
-docker pull repository.tf/kubernetes/pangolin-ingress-controller:latest
+docker pull ghcr.io/corelyr-oss/pangolin-ingress-controller:latest
 ```
 
 Helm installations use this registry path by default (see `chart/values.yaml`).
@@ -210,6 +210,164 @@ kubectl port-forward -n example-app svc/example-service 8080:80
 
 # Access the application
 curl http://example.local:8080
+```
+
+## Annotations
+
+The Pangolin Ingress Controller supports the following annotations on Ingress resources to configure Pangolin resource settings.
+
+### SSO / Access Control
+
+| Annotation | Type | Default | Description |
+|------------|------|---------|-------------|
+| `pangolin.ingress.k8s.io/sso` | `bool` | *(unset)* | Enable or disable Pangolin SSO authentication for the resource |
+| `pangolin.ingress.k8s.io/ssl` | `bool` | *(unset)* | Enable or disable SSL termination |
+| `pangolin.ingress.k8s.io/block-access` | `bool` | *(unset)* | Block all access to the resource |
+| `pangolin.ingress.k8s.io/email-whitelist-enabled` | `bool` | *(unset)* | Enable email whitelist–based access control |
+| `pangolin.ingress.k8s.io/apply-rules` | `bool` | *(unset)* | Apply organization-level access rules to the resource |
+| `pangolin.ingress.k8s.io/enabled` | `bool` | *(unset)* | Enable or disable the Pangolin resource entirely |
+
+### Proxy Settings
+
+| Annotation | Type | Default | Description |
+|------------|------|---------|-------------|
+| `pangolin.ingress.k8s.io/sticky-session` | `bool` | `false` | Enable sticky sessions (session affinity) |
+| `pangolin.ingress.k8s.io/tls-server-name` | `string` | *(unset)* | Override the TLS server name for backend connections |
+| `pangolin.ingress.k8s.io/set-host-header` | `string` | *(unset)* | Override the Host header sent to the backend |
+| `pangolin.ingress.k8s.io/post-auth-path` | `string` | *(unset)* | Path to redirect to after successful authentication |
+| `pangolin.ingress.k8s.io/headers` | `JSON` | *(unset)* | Custom headers to add to proxied requests (JSON array) |
+
+### Health Checks
+
+| Annotation | Type | Default | Description |
+|------------|------|---------|-------------|
+| `pangolin.ingress.k8s.io/healthcheck-enabled` | `bool` | *(unset)* | Enable health checks for the target |
+| `pangolin.ingress.k8s.io/healthcheck-path` | `string` | *(unset)* | HTTP path to probe (e.g. `/healthz`) |
+| `pangolin.ingress.k8s.io/healthcheck-scheme` | `string` | *(unset)* | Scheme for the health check (`http` or `https`) |
+| `pangolin.ingress.k8s.io/healthcheck-mode` | `string` | *(unset)* | Health check mode |
+| `pangolin.ingress.k8s.io/healthcheck-hostname` | `string` | *(unset)* | Hostname to use in the health check request |
+| `pangolin.ingress.k8s.io/healthcheck-port` | `int` | *(unset)* | Port to probe (defaults to the target port) |
+| `pangolin.ingress.k8s.io/healthcheck-interval` | `int` | *(unset)* | Interval in seconds between checks (min 6) |
+| `pangolin.ingress.k8s.io/healthcheck-unhealthy-interval` | `int` | *(unset)* | Interval in seconds between checks when unhealthy (min 6) |
+| `pangolin.ingress.k8s.io/healthcheck-timeout` | `int` | *(unset)* | Timeout in seconds for each check (min 2) |
+| `pangolin.ingress.k8s.io/healthcheck-headers` | `JSON` | *(unset)* | Custom headers for health check requests (JSON array) |
+| `pangolin.ingress.k8s.io/healthcheck-follow-redirects` | `bool` | *(unset)* | Follow HTTP redirects during health checks |
+| `pangolin.ingress.k8s.io/healthcheck-method` | `string` | *(unset)* | HTTP method for health checks (e.g. `GET`, `HEAD`) |
+| `pangolin.ingress.k8s.io/healthcheck-status` | `int` | *(unset)* | Expected HTTP status code for a healthy response |
+| `pangolin.ingress.k8s.io/healthcheck-tls-server-name` | `string` | *(unset)* | TLS server name for health check connections |
+
+### Internal / Managed
+
+| Annotation | Type | Description |
+|------------|------|-------------|
+| `pangolin.ingress.k8s.io/resource-id` | `string` | Automatically set by the controller to track the Pangolin resource ID |
+
+### Example: Disable SSO
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: public-app
+  annotations:
+    pangolin.ingress.k8s.io/sso: "false"
+    pangolin.ingress.k8s.io/ssl: "true"
+spec:
+  ingressClassName: pangolin
+  rules:
+  - host: app.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: app-service
+            port:
+              number: 80
+```
+
+### Example: Sticky Sessions and Custom Headers
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: stateful-app
+  annotations:
+    pangolin.ingress.k8s.io/sticky-session: "true"
+    pangolin.ingress.k8s.io/set-host-header: "internal.example.com"
+    pangolin.ingress.k8s.io/headers: '[{"name":"X-Custom-Header","value":"my-value"}]'
+spec:
+  ingressClassName: pangolin
+  rules:
+  - host: stateful.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: stateful-service
+            port:
+              number: 8080
+```
+
+### Example: Full Access Control
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: protected-app
+  annotations:
+    pangolin.ingress.k8s.io/sso: "true"
+    pangolin.ingress.k8s.io/ssl: "true"
+    pangolin.ingress.k8s.io/apply-rules: "true"
+    pangolin.ingress.k8s.io/email-whitelist-enabled: "true"
+    pangolin.ingress.k8s.io/post-auth-path: "/dashboard"
+spec:
+  ingressClassName: pangolin
+  rules:
+  - host: protected.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: protected-service
+            port:
+              number: 443
+```
+
+### Example: Health Checks
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: monitored-app
+  annotations:
+    pangolin.ingress.k8s.io/healthcheck-enabled: "true"
+    pangolin.ingress.k8s.io/healthcheck-path: "/healthz"
+    pangolin.ingress.k8s.io/healthcheck-interval: "30"
+    pangolin.ingress.k8s.io/healthcheck-timeout: "5"
+    pangolin.ingress.k8s.io/healthcheck-method: "GET"
+    pangolin.ingress.k8s.io/healthcheck-status: "200"
+spec:
+  ingressClassName: pangolin
+  rules:
+  - host: monitored.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: monitored-service
+            port:
+              number: 8080
 ```
 
 ## Configuration
@@ -370,7 +528,7 @@ When leader election is enabled, multiple controller replicas can run simultaneo
 - [ ] Authentication/Authorization middleware
 - [ ] WebSocket support
 - [ ] gRPC backend support
-- [ ] Custom annotations for advanced configurations
+- [x] Custom annotations for advanced configurations
 - [ ] Integration with external load balancers
 - [ ] Admission webhooks for validation
 

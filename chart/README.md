@@ -57,6 +57,80 @@ The following table lists the configurable parameters of the Pangolin Ingress Co
 | `resources.requests.cpu` | CPU request | `10m` |
 | `resources.requests.memory` | Memory request | `64Mi` |
 
+## Ingress Annotations
+
+The controller reads the following annotations from Ingress resources to configure Pangolin resource settings. All annotations are optional — omit an annotation to leave the corresponding setting at its Pangolin default.
+
+### SSO / Access Control
+
+| Annotation | Type | Description |
+|------------|------|-------------|
+| `pangolin.ingress.k8s.io/sso` | `bool` | Enable or disable Pangolin SSO authentication |
+| `pangolin.ingress.k8s.io/ssl` | `bool` | Enable or disable SSL termination |
+| `pangolin.ingress.k8s.io/block-access` | `bool` | Block all access to the resource |
+| `pangolin.ingress.k8s.io/email-whitelist-enabled` | `bool` | Enable email whitelist–based access control |
+| `pangolin.ingress.k8s.io/apply-rules` | `bool` | Apply organization-level access rules |
+| `pangolin.ingress.k8s.io/enabled` | `bool` | Enable or disable the Pangolin resource |
+
+### Proxy Settings
+
+| Annotation | Type | Description |
+|------------|------|-------------|
+| `pangolin.ingress.k8s.io/sticky-session` | `bool` | Enable sticky sessions (session affinity) |
+| `pangolin.ingress.k8s.io/tls-server-name` | `string` | Override TLS server name for backend connections |
+| `pangolin.ingress.k8s.io/set-host-header` | `string` | Override the Host header sent to the backend |
+| `pangolin.ingress.k8s.io/post-auth-path` | `string` | Path to redirect to after authentication |
+| `pangolin.ingress.k8s.io/headers` | `JSON` | Custom proxy headers as a JSON array: `'[{"name":"X-Foo","value":"bar"}]'` |
+
+### Health Checks
+
+| Annotation | Type | Description |
+|------------|------|-------------|
+| `pangolin.ingress.k8s.io/healthcheck-enabled` | `bool` | Enable health checks for the target |
+| `pangolin.ingress.k8s.io/healthcheck-path` | `string` | HTTP path to probe (e.g. `/healthz`) |
+| `pangolin.ingress.k8s.io/healthcheck-scheme` | `string` | Scheme for the health check (`http` or `https`) |
+| `pangolin.ingress.k8s.io/healthcheck-mode` | `string` | Health check mode |
+| `pangolin.ingress.k8s.io/healthcheck-hostname` | `string` | Hostname for the health check request |
+| `pangolin.ingress.k8s.io/healthcheck-port` | `int` | Port to probe (defaults to target port) |
+| `pangolin.ingress.k8s.io/healthcheck-interval` | `int` | Interval in seconds between checks (min 6) |
+| `pangolin.ingress.k8s.io/healthcheck-unhealthy-interval` | `int` | Interval when unhealthy (min 6) |
+| `pangolin.ingress.k8s.io/healthcheck-timeout` | `int` | Timeout in seconds per check (min 2) |
+| `pangolin.ingress.k8s.io/healthcheck-headers` | `JSON` | Custom headers as JSON array: `'[{"name":"X-Foo","value":"bar"}]'` |
+| `pangolin.ingress.k8s.io/healthcheck-follow-redirects` | `bool` | Follow HTTP redirects during checks |
+| `pangolin.ingress.k8s.io/healthcheck-method` | `string` | HTTP method (e.g. `GET`, `HEAD`) |
+| `pangolin.ingress.k8s.io/healthcheck-status` | `int` | Expected HTTP status code |
+| `pangolin.ingress.k8s.io/healthcheck-tls-server-name` | `string` | TLS server name for health check connections |
+
+### Examples
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-app
+  annotations:
+    pangolin.ingress.k8s.io/sso: "false"
+    pangolin.ingress.k8s.io/ssl: "true"
+    pangolin.ingress.k8s.io/sticky-session: "true"
+    pangolin.ingress.k8s.io/healthcheck-enabled: "true"
+    pangolin.ingress.k8s.io/healthcheck-path: "/healthz"
+    pangolin.ingress.k8s.io/healthcheck-interval: "30"
+    pangolin.ingress.k8s.io/healthcheck-timeout: "5"
+spec:
+  ingressClassName: pangolin
+  rules:
+  - host: app.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: app-service
+            port:
+              number: 80
+```
+
 ## Upgrading
 
 To upgrade an existing release:
