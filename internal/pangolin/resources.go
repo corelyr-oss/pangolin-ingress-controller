@@ -42,17 +42,17 @@ type CreateResourceRequest struct {
 	HTTP          bool   `json:"http"`
 	Protocol      string `json:"protocol"`
 	DomainID      string `json:"domainId"`
-	StickySession bool   `json:"stickySession"`
-	Enabled       bool   `json:"enabled"`
+	StickySession bool   `json:"stickySession,omitempty"`
+	PostAuthPath  string `json:"postAuthPath,omitempty"`
 }
 
 // UpdateResourceRequest represents the request to update a resource
 type UpdateResourceRequest struct {
-	Name          string `json:"name"`
+	Name          string `json:"name,omitempty"`
 	Subdomain     string `json:"subdomain,omitempty"`
-	DomainID      string `json:"domainId"`
-	Enabled       bool   `json:"enabled"`
-	StickySession bool   `json:"stickySession"`
+	DomainID      string `json:"domainId,omitempty"`
+	Enabled       *bool  `json:"enabled,omitempty"`
+	StickySession *bool  `json:"stickySession,omitempty"`
 }
 
 // CreateTargetRequest represents the request to create a target

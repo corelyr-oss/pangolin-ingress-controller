@@ -305,21 +305,19 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 	}
 
 	resourceReq := &pangolin.CreateResourceRequest{
-		Name:          resourceName,
-		Subdomain:     subdomain,
-		HTTP:          true,
-		Protocol:      "tcp",
-		DomainID:      domainID,
-		Enabled:       true,
-		StickySession: false,
+		Name:      resourceName,
+		Subdomain: subdomain,
+		HTTP:      true,
+		Protocol:  "tcp",
+		DomainID:  domainID,
 	}
 
+	enabled := true
 	updateReq := &pangolin.UpdateResourceRequest{
-		Name:          resourceName,
-		Subdomain:     subdomain,
-		DomainID:      domainID,
-		Enabled:       true,
-		StickySession: false,
+		Name:      resourceName,
+		Subdomain: subdomain,
+		DomainID:  domainID,
+		Enabled:   &enabled,
 	}
 
 	var resource *pangolin.Resource
