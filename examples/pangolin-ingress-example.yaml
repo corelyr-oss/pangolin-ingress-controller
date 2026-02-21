@@ -48,7 +48,8 @@ metadata:
     pangolin.ingress.k8s.io/sticky-session: "true"
     pangolin.ingress.k8s.io/healthcheck-enabled: "true"
     pangolin.ingress.k8s.io/healthcheck-path: "/"
-    pangolin.ingress.k8s.io/healthcheck-interval: "30"
+    pangolin.ingress.k8s.io/healthcheck-interval: "5"
+    pangolin.ingress.k8s.io/healthcheck-unhealthy-interval: "30"
     pangolin.ingress.k8s.io/healthcheck-timeout: "5"
     pangolin.ingress.k8s.io/healthcheck-status: "200"
 spec:

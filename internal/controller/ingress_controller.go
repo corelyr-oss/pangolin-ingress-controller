@@ -327,7 +327,7 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 	if prefix == "" {
 		prefix = "pangolin-controller"
 	}
-	resourceName := fmt.Sprintf("%s-%s-%s-%s", prefix, ingress.Namespace, ingress.Name, subdomain)
+	resourceName := fmt.Sprintf("%s-%s", prefix, host)
 
 	// Check if resource already exists (stored in annotation)
 	resourceID := ingress.Annotations[annotationResourceID]
@@ -393,10 +393,21 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		// Create new resource
 		resource, err = r.PangolinClient.CreateResource(ctx, resourceReq)
 		if err != nil {
-			log.Error(err, "Failed to create Pangolin resource", "subdomain", subdomain, "domain", domain, "host", host)
-			return fmt.Errorf("failed to create Pangolin resource for host %s: %w", host, err)
+			if pangolin.IsConflict(err) {
+				// Resource already exists in Pangolin — adopt it
+				log.Info("Resource already exists, attempting to adopt", "host", host, "subdomain", subdomain)
+				resource, err = r.findExistingResource(ctx, subdomain, domainID)
+				if err != nil {
+					return fmt.Errorf("failed to adopt existing Pangolin resource for host %s: %w", host, err)
+				}
+				log.Info("Adopted existing Pangolin resource", "resourceID", resource.ID, "name", resource.Name)
+			} else {
+				log.Error(err, "Failed to create Pangolin resource", "subdomain", subdomain, "domain", domain, "host", host)
+				return fmt.Errorf("failed to create Pangolin resource for host %s: %w", host, err)
+			}
+		} else {
+			log.Info("Created Pangolin resource", "resourceID", resource.ID, "name", resourceName)
 		}
-		log.Info("Created Pangolin resource", "resourceID", resource.ID, "name", resourceName)
 
 		// Store resource ID in annotation
 		if ingress.Annotations == nil {
@@ -408,11 +419,11 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 			return err
 		}
 
-		// Apply update settings (SSO, SSL, etc.) to the newly created resource
+		// Apply update settings (SSO, SSL, etc.) to the resource
 		resource, err = r.PangolinClient.UpdateResource(ctx, resourceID, updateReq)
 		if err != nil {
-			log.Error(err, "Failed to apply settings to new Pangolin resource", "resourceID", resourceID)
-			return fmt.Errorf("failed to apply settings to new Pangolin resource %s: %w", resourceID, err)
+			log.Error(err, "Failed to apply settings to Pangolin resource", "resourceID", resourceID)
+			return fmt.Errorf("failed to apply settings to Pangolin resource %s: %w", resourceID, err)
 		}
 	}
 
@@ -506,6 +517,23 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 	}
 
 	return nil
+}
+
+// findExistingResource searches for an existing Pangolin resource matching the
+// given subdomain and domainID. This is used to adopt resources that already
+// exist when a create returns 409 Conflict.
+func (r *IngressReconciler) findExistingResource(ctx context.Context, subdomain, domainID string) (*pangolin.Resource, error) {
+	resources, err := r.PangolinClient.ListResources(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list resources: %w", err)
+	}
+	for i := range resources {
+		res := &resources[i]
+		if res.Subdomain == subdomain && res.DomainID == domainID {
+			return res, nil
+		}
+	}
+	return nil, fmt.Errorf("could not find existing resource with subdomain %q and domainID %q", subdomain, domainID)
 }
 
 // deletePangolinResources deletes all Pangolin resources associated with an ingress

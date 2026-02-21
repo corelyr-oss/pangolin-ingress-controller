@@ -70,6 +70,21 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	return resp, nil
 }
 
+// ConflictError is returned when the API responds with 409 Conflict
+type ConflictError struct {
+	Message string
+}
+
+func (e *ConflictError) Error() string {
+	return e.Message
+}
+
+// IsConflict returns true if the error is a 409 Conflict
+func IsConflict(err error) bool {
+	_, ok := err.(*ConflictError)
+	return ok
+}
+
 // checkResponse checks the HTTP response for errors
 func checkResponse(resp *http.Response) error {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -77,5 +92,9 @@ func checkResponse(resp *http.Response) error {
 	}
 
 	body, _ := io.ReadAll(resp.Body)
-	return fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+	msg := fmt.Sprintf("API request failed with status %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode == http.StatusConflict {
+		return &ConflictError{Message: msg}
+	}
+	return fmt.Errorf("%s", msg)
 }
