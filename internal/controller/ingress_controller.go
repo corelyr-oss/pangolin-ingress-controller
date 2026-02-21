@@ -263,26 +263,44 @@ func (r *IngressReconciler) updateIngressStatus(ctx context.Context, ingress *ne
 		return err
 	}
 
+	// Build the desired LoadBalancer status entry.
+	// Prefer the site's proxy IP; fall back to the first ingress rule hostname
+	// so that ArgoCD (and similar tools) see the Ingress as healthy.
+	var desired networkingv1.IngressLoadBalancerIngress
 	proxyIP := site.ProxyIP
-	if proxyIP == "" {
-		log.Info("Configured site has no proxy IP, skipping status update", "site", site.NiceID)
-		return nil
+	if proxyIP != "" {
+		desired.IP = proxyIP
+	} else {
+		// Use the first rule host as the hostname fallback
+		for _, rule := range ingress.Spec.Rules {
+			if rule.Host != "" {
+				desired.Hostname = rule.Host
+				break
+			}
+		}
+		if desired.Hostname == "" {
+			log.Info("Configured site has no proxy IP and ingress has no host rules, skipping status update", "site", site.NiceID)
+			return nil
+		}
 	}
 
 	needsUpdate := false
 	if len(ingress.Status.LoadBalancer.Ingress) == 0 {
 		needsUpdate = true
-	} else if ingress.Status.LoadBalancer.Ingress[0].IP != proxyIP {
-		needsUpdate = true
+	} else {
+		cur := ingress.Status.LoadBalancer.Ingress[0]
+		if cur.IP != desired.IP || cur.Hostname != desired.Hostname {
+			needsUpdate = true
+		}
 	}
 
 	if needsUpdate {
-		ingress.Status.LoadBalancer.Ingress = []networkingv1.IngressLoadBalancerIngress{{IP: proxyIP}}
+		ingress.Status.LoadBalancer.Ingress = []networkingv1.IngressLoadBalancerIngress{desired}
 		if err := r.Status().Update(ctx, ingress); err != nil {
 			log.Error(err, "Failed to update Ingress status")
 			return err
 		}
-		log.Info("Updated Ingress status with Pangolin proxy IP", "name", ingress.Name, "proxyIP", proxyIP)
+		log.Info("Updated Ingress status with Pangolin address", "name", ingress.Name, "ip", desired.IP, "hostname", desired.Hostname)
 	}
 
 	return nil
