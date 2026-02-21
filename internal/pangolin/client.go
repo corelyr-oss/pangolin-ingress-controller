@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -47,6 +49,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
+		log.FromContext(ctx).V(1).Info("Pangolin API request", "method", method, "path", path, "body", string(jsonData))
 		reqBody = bytes.NewBuffer(jsonData)
 	}
 

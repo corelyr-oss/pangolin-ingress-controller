@@ -16,6 +16,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -469,6 +470,7 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		HCTLSServerName:     parseStringAnnotation(annotations, annotationHCTLSServerName),
 	}
 
+	var activeTargetID int
 	if existingTarget != nil {
 		// Target already exists — update it instead of creating a duplicate
 		targetIDStr := strconv.Itoa(existingTarget.ID)
@@ -477,15 +479,30 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 			log.Error(err, "Failed to update Pangolin target", "targetID", targetIDStr, "resourceID", resourceID)
 			return fmt.Errorf("failed to update Pangolin target %s: %w", targetIDStr, err)
 		}
+		activeTargetID = existingTarget.ID
 		log.Info("Updated existing Pangolin target", "targetID", targetIDStr, "service", serviceName, "port", servicePort)
 	} else {
 		// No matching target — create a new one
-		_, err = r.PangolinClient.CreateTarget(ctx, resourceID, targetReq)
-		if err != nil {
-			log.Error(err, "Failed to create Pangolin target", "resourceID", resourceID, "service", serviceName, "port", servicePort)
-			return fmt.Errorf("failed to create Pangolin target for service %s:%d: %w", serviceName, servicePort, err)
+		newTarget, createErr := r.PangolinClient.CreateTarget(ctx, resourceID, targetReq)
+		if createErr != nil {
+			log.Error(createErr, "Failed to create Pangolin target", "resourceID", resourceID, "service", serviceName, "port", servicePort)
+			return fmt.Errorf("failed to create Pangolin target for service %s:%d: %w", serviceName, servicePort, createErr)
 		}
-		log.Info("Created Pangolin target", "service", serviceName, "port", servicePort)
+		activeTargetID = newTarget.ID
+		log.Info("Created Pangolin target", "targetID", newTarget.ID, "service", serviceName, "port", servicePort)
+	}
+
+	// Clean up stale targets that don't match the active one
+	for _, t := range existingTargets {
+		if t.ID == activeTargetID {
+			continue
+		}
+		staleID := strconv.Itoa(t.ID)
+		if delErr := r.PangolinClient.DeleteTarget(ctx, staleID); delErr != nil {
+			log.Error(delErr, "Failed to delete stale Pangolin target", "targetID", staleID)
+		} else {
+			log.Info("Deleted stale Pangolin target", "targetID", staleID, "ip", t.IP, "port", t.Port)
+		}
 	}
 
 	return nil
@@ -650,13 +667,52 @@ func parseHeadersAnnotation(annotations map[string]string, key string) []pangoli
 	return headers
 }
 
+// pangolinAnnotationChangedPredicate triggers reconciliation when any
+// pangolin.ingress.k8s.io/* annotation changes EXCEPT the controller-managed
+// resource-id annotation (which the controller itself writes).
+type pangolinAnnotationChangedPredicate struct {
+	predicate.Funcs
+}
+
+func (p pangolinAnnotationChangedPredicate) Update(e event.UpdateEvent) bool {
+	if e.ObjectOld == nil || e.ObjectNew == nil {
+		return false
+	}
+	oldAnn := e.ObjectOld.GetAnnotations()
+	newAnn := e.ObjectNew.GetAnnotations()
+	for key, newVal := range newAnn {
+		if key == annotationResourceID {
+			continue
+		}
+		if !strings.HasPrefix(key, "pangolin.ingress.k8s.io/") {
+			continue
+		}
+		if oldAnn[key] != newVal {
+			return true
+		}
+	}
+	// Check for removed pangolin annotations
+	for key := range oldAnn {
+		if key == annotationResourceID {
+			continue
+		}
+		if !strings.HasPrefix(key, "pangolin.ingress.k8s.io/") {
+			continue
+		}
+		if _, exists := newAnn[key]; !exists {
+			return true
+		}
+	}
+	return false
+}
+
 // SetupWithManager sets up the controller with the Manager
 func (r *IngressReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkingv1.Ingress{}).
 		WithEventFilter(predicate.Or(
 			predicate.GenerationChangedPredicate{},
-			predicate.AnnotationChangedPredicate{},
+			pangolinAnnotationChangedPredicate{},
 		)).
 		Complete(r)
 }
