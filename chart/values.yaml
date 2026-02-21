@@ -5,7 +5,7 @@
 replicaCount: 1
 
 image:
-  repository: repository.tf/kubernetes/pangolin-ingress-controller
+  repository: ghcr.io/corelyr-oss/pangolin-ingress-controller
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
