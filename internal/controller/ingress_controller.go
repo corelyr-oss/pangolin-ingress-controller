@@ -519,6 +519,14 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		}
 		activeTargetID = newTarget.ID
 		log.Info("Created Pangolin target", "targetID", newTarget.ID, "service", serviceName, "port", servicePort)
+
+		// Pangolin may ignore health-check fields during target creation,
+		// so apply them via an explicit update to ensure they take effect.
+		targetIDStr := strconv.Itoa(newTarget.ID)
+		if _, err := r.PangolinClient.UpdateTarget(ctx, targetIDStr, targetReq); err != nil {
+			log.Error(err, "Failed to apply settings to new Pangolin target", "targetID", targetIDStr)
+			return fmt.Errorf("failed to apply settings to new Pangolin target %s: %w", targetIDStr, err)
+		}
 	}
 
 	// Clean up stale targets that don't match the active one
