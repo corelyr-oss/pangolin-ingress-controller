@@ -51,9 +51,7 @@ func main() {
 	flag.StringVar(&pangolinSiteNiceID, "pangolin-site-nice-id", "", "The Pangolin site nice ID to attach resources/targets to.")
 	flag.StringVar(&resourcePrefix, "resource-prefix", "pangolin-controller", "Prefix for Pangolin resource names.")
 
-	opts := zap.Options{
-		Development: true,
-	}
+	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 

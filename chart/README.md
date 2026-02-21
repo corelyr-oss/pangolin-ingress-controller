@@ -45,6 +45,7 @@ The following table lists the configurable parameters of the Pangolin Ingress Co
 | `pangolin.apiKeyNamespace` | Namespace where the API key secret is stored | *(empty; defaults to release namespace)* |
 | `controller.ingressClass` | Ingress class name | `pangolin` |
 | `controller.resourcePrefix` | Prefix for Pangolin resource names | `pangolin-controller` |
+| `controller.logLevel` | Log level: `info`, `debug`, `error` (or integer: 0=info, 1=debug, 2=trace) | `info` |
 | `controller.leaderElect` | Enable leader election | `true` |
 | `ingressClass.enabled` | Create IngressClass resource | `true` |
 | `ingressClass.isDefault` | Set as default ingress class | `false` |
