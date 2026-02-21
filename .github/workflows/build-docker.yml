@@ -1,0 +1,121 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version to build'
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine image tags
+        id: tags
+        shell: sh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          EVENT="${{ github.event_name }}"
+          REF="${{ github.ref }}"
+          TAGS=""
+
+          if [ "$EVENT" = "push" ] && [ "${REF#refs/heads/}" != "$REF" ]; then
+            BRANCH="${REF#refs/heads/}"
+            TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${BRANCH}"
+
+            if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            fi
+
+            SHORT_SHA=$(printf '%s' "${{ github.sha }}" | cut -c1-7)
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${BRANCH}-${SHORT_SHA}"
+          fi
+
+          if [ "${REF#refs/tags/v}" != "$REF" ]; then
+            VERSION="${REF#refs/tags/v}"
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${VERSION}"
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
+
+            MAJOR_MINOR=$(printf '%s' "$VERSION" | cut -d. -f1,2)
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR_MINOR}"
+
+            MAJOR=$(printf '%s' "$VERSION" | cut -d. -f1)
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR}"
+          fi
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            if [ -z "$INPUT_VERSION" ]; then
+              echo "workflow_dispatch requires the 'version' input" >&2
+              exit 1
+            fi
+
+            VERSION_RAW="$INPUT_VERSION"
+            VERSION=${VERSION_RAW#v}
+
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
+
+            if [ "$VERSION_RAW" != "$VERSION" ]; then
+              TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION_RAW}"
+            fi
+
+            MAJOR_MINOR=$(printf '%s' "$VERSION" | cut -d. -f1,2)
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR_MINOR}"
+
+            MAJOR=$(printf '%s' "$VERSION" | cut -d. -f1)
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MAJOR}"
+          fi
+
+          if [ "$EVENT" = "pull_request" ]; then
+            TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.number }}"
+          fi
+
+          if [ -z "$TAGS" ]; then
+            echo "No destinations determined; building without push."
+          fi
+
+          TAGS=$(echo "$TAGS" | sed 's/^,//')
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "Image tags: ${TAGS}"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
