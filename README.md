@@ -242,19 +242,21 @@ The Pangolin Ingress Controller supports the following annotations on Ingress re
 | Annotation | Type | Default | Description |
 |------------|------|---------|-------------|
 | `pangolin.ingress.k8s.io/healthcheck-enabled` | `bool` | *(unset)* | Enable health checks for the target |
-| `pangolin.ingress.k8s.io/healthcheck-path` | `string` | *(unset)* | HTTP path to probe (e.g. `/healthz`) |
+| `pangolin.ingress.k8s.io/healthcheck-path` | `string` | `/` | HTTP path to probe (e.g. `/healthz`) |
 | `pangolin.ingress.k8s.io/healthcheck-scheme` | `string` | *(unset)* | Scheme for the health check (`http` or `https`) |
 | `pangolin.ingress.k8s.io/healthcheck-mode` | `string` | *(unset)* | Health check mode |
-| `pangolin.ingress.k8s.io/healthcheck-hostname` | `string` | *(unset)* | Hostname to use in the health check request |
-| `pangolin.ingress.k8s.io/healthcheck-port` | `int` | *(unset)* | Port to probe (defaults to the target port) |
-| `pangolin.ingress.k8s.io/healthcheck-interval` | `int` | *(unset)* | Interval in seconds between checks (min 6) |
-| `pangolin.ingress.k8s.io/healthcheck-unhealthy-interval` | `int` | *(unset)* | Interval in seconds between checks when unhealthy (min 6) |
-| `pangolin.ingress.k8s.io/healthcheck-timeout` | `int` | *(unset)* | Timeout in seconds for each check (min 2) |
+| `pangolin.ingress.k8s.io/healthcheck-hostname` | `string` | *target IP* | Hostname to use in the health check request |
+| `pangolin.ingress.k8s.io/healthcheck-port` | `int` | *service port* | Port to probe |
+| `pangolin.ingress.k8s.io/healthcheck-interval` | `int` | `30` | Interval in seconds between checks (min 5) |
+| `pangolin.ingress.k8s.io/healthcheck-unhealthy-interval` | `int` | *(unset)* | Interval in seconds between checks when unhealthy (min 5) |
+| `pangolin.ingress.k8s.io/healthcheck-timeout` | `int` | *(unset)* | Timeout in seconds for each check (min 1) |
 | `pangolin.ingress.k8s.io/healthcheck-headers` | `JSON` | *(unset)* | Custom headers for health check requests (JSON array) |
 | `pangolin.ingress.k8s.io/healthcheck-follow-redirects` | `bool` | *(unset)* | Follow HTTP redirects during health checks |
-| `pangolin.ingress.k8s.io/healthcheck-method` | `string` | *(unset)* | HTTP method for health checks (e.g. `GET`, `HEAD`) |
+| `pangolin.ingress.k8s.io/healthcheck-method` | `string` | `GET` | HTTP method for health checks (e.g. `GET`, `HEAD`) |
 | `pangolin.ingress.k8s.io/healthcheck-status` | `int` | *(unset)* | Expected HTTP status code for a healthy response |
 | `pangolin.ingress.k8s.io/healthcheck-tls-server-name` | `string` | *(unset)* | TLS server name for health check connections |
+
+> **Note:** When `healthcheck-enabled` is `"true"`, the controller automatically fills in defaults for the five fields that Pangolin requires (`path`, `hostname`, `port`, `interval`, `method`). You only need to set `healthcheck-enabled: "true"` for a minimal working health check.
 
 ### Internal / Managed
 

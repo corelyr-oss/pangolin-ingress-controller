@@ -499,6 +499,31 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		HCTLSServerName:     parseStringAnnotation(annotations, annotationHCTLSServerName),
 	}
 
+	// Pangolin requires hcPath, hcHostname, hcPort, hcInterval, and hcMethod
+	// to all be non-null for health checks to be pushed to Newt. When health
+	// checks are enabled, fill in sensible defaults for any missing fields.
+	if targetReq.HCEnabled != nil && *targetReq.HCEnabled {
+		if targetReq.HCPath == nil {
+			s := "/"
+			targetReq.HCPath = &s
+		}
+		if targetReq.HCHostname == nil {
+			targetReq.HCHostname = &targetIP
+		}
+		if targetReq.HCPort == nil {
+			p := int(servicePort)
+			targetReq.HCPort = &p
+		}
+		if targetReq.HCInterval == nil {
+			i := 30
+			targetReq.HCInterval = &i
+		}
+		if targetReq.HCMethod == nil {
+			m := "GET"
+			targetReq.HCMethod = &m
+		}
+	}
+
 	var activeTargetID int
 	if existingTarget != nil {
 		// Target already exists — update it instead of creating a duplicate
@@ -519,14 +544,6 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		}
 		activeTargetID = newTarget.ID
 		log.Info("Created Pangolin target", "targetID", newTarget.ID, "service", serviceName, "port", servicePort)
-
-		// Pangolin may ignore health-check fields during target creation,
-		// so apply them via an explicit update to ensure they take effect.
-		targetIDStr := strconv.Itoa(newTarget.ID)
-		if _, err := r.PangolinClient.UpdateTarget(ctx, targetIDStr, targetReq); err != nil {
-			log.Error(err, "Failed to apply settings to new Pangolin target", "targetID", targetIDStr)
-			return fmt.Errorf("failed to apply settings to new Pangolin target %s: %w", targetIDStr, err)
-		}
 	}
 
 	// Clean up stale targets that don't match the active one
