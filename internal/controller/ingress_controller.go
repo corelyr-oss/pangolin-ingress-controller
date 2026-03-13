@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"golang.org/x/net/publicsuffix"
 
 	"github.com/vinzenz/pangolin-ingress-controller/internal/pangolin"
 )
@@ -74,7 +76,7 @@ type IngressReconciler struct {
 	OrgID           string
 	SiteNiceID      string
 	domainMu        sync.RWMutex
-	domainMap       map[string]string
+	domainCache     []pangolin.Domain
 	siteMu          sync.RWMutex
 	siteCache       *pangolin.Site
 }
@@ -335,10 +337,12 @@ func (r *IngressReconciler) initPangolinClient(ctx context.Context) error {
 func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, ingress *networkingv1.Ingress, host string, path networkingv1.HTTPIngressPath, serviceName string, servicePort int32) error {
 	log := log.FromContext(ctx)
 
-	// Parse host into subdomain and domain
-	// For simplicity, assume host format is subdomain.domain.tld
-	// In production, you'd want more sophisticated parsing
-	subdomain, domain := parseHost(host)
+	// Resolve host against known Pangolin domains
+	subdomain, domainID, err := r.resolveHostDomain(ctx, host)
+	if err != nil {
+		log.Error(err, "Failed to resolve host domain", "host", host)
+		return err
+	}
 
 	// Create resource name with configurable prefix
 	prefix := r.ResourcePrefix
@@ -349,18 +353,6 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 
 	// Check if resource already exists (stored in annotation)
 	resourceID := ingress.Annotations[annotationResourceID]
-
-	var err error
-
-	if domain == "" {
-		return fmt.Errorf("host %s is missing a registrable domain", host)
-	}
-
-	domainID, err := r.resolveDomainID(ctx, domain)
-	if err != nil {
-		log.Error(err, "Failed to resolve domain ID", "domain", domain)
-		return err
-	}
 
 	// Parse annotations for proxy and access control settings
 	annotations := ingress.Annotations
@@ -403,7 +395,7 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 	if resourceID != "" {
 		resource, err = r.PangolinClient.UpdateResource(ctx, resourceID, updateReq)
 		if err != nil {
-			log.Error(err, "Failed to update Pangolin resource", "resourceID", resourceID, "subdomain", subdomain, "domain", domain, "host", host)
+			log.Error(err, "Failed to update Pangolin resource", "resourceID", resourceID, "subdomain", subdomain, "domainID", domainID, "host", host)
 			return fmt.Errorf("failed to update Pangolin resource %s: %w", resourceID, err)
 		}
 		log.Info("Updated Pangolin resource", "resourceID", resourceID, "name", resourceName)
@@ -420,7 +412,7 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 				}
 				log.Info("Adopted existing Pangolin resource", "resourceID", resource.ID, "name", resource.Name)
 			} else {
-				log.Error(err, "Failed to create Pangolin resource", "subdomain", subdomain, "domain", domain, "host", host)
+				log.Error(err, "Failed to create Pangolin resource", "subdomain", subdomain, "domainID", domainID, "host", host)
 				return fmt.Errorf("failed to create Pangolin resource for host %s: %w", host, err)
 			}
 		} else {
@@ -599,22 +591,90 @@ func (r *IngressReconciler) deletePangolinResources(ctx context.Context, ingress
 	return nil
 }
 
-// parseHost parses a hostname into subdomain and domain
-func parseHost(host string) (subdomain, domain string) {
+// matchHostToDomains matches a host against a list of known Pangolin domains
+// using suffix matching. The domains slice must be sorted by BaseDomain length
+// descending (longest first) so that the most specific domain wins.
+// Returns the subdomain prefix, the matching domain ID, and whether a match was found.
+func matchHostToDomains(host string, domains []pangolin.Domain) (subdomain, domainID string, matched bool) {
+	for _, d := range domains {
+		if strings.HasSuffix(host, "."+d.BaseDomain) {
+			return strings.TrimSuffix(host, "."+d.BaseDomain), d.ID, true
+		}
+		if host == d.BaseDomain {
+			return "", d.ID, true
+		}
+	}
+	return "", "", false
+}
+
+// resolveHostDomain resolves a hostname against known Pangolin domains,
+// returning the subdomain, domain ID, and any error.
+// It uses API-first matching: the host is matched against known Pangolin
+// domains by suffix, with the longest match winning. If no Pangolin domain
+// matches, it falls back to the Public Suffix List to parse the domain.
+func (r *IngressReconciler) resolveHostDomain(ctx context.Context, host string) (subdomain, domainID string, err error) {
 	host = strings.TrimSpace(host)
 	if host == "" {
-		return "", ""
+		return "", "", fmt.Errorf("empty host")
 	}
-	parts := strings.Split(host, ".")
-	if len(parts) < 2 {
-		return host, ""
+
+	domains, err := r.loadDomains(ctx)
+	if err != nil {
+		return "", "", err
 	}
-	domain = strings.Join(parts[len(parts)-2:], ".")
-	if len(parts) == 2 {
-		return "", domain
+
+	// Try API-first matching (domains are sorted longest-first)
+	if sub, id, ok := matchHostToDomains(host, domains); ok {
+		return sub, id, nil
 	}
-	subdomain = strings.Join(parts[:len(parts)-2], ".")
-	return subdomain, domain
+
+	// Fallback: use Public Suffix List to extract the registrable domain,
+	// then try an exact lookup against the cached Pangolin domains.
+	pslDomain, pslErr := publicsuffix.EffectiveTLDPlusOne(host)
+	if pslErr != nil {
+		return "", "", fmt.Errorf("no matching Pangolin domain found for host %q and PSL fallback failed: %w", host, pslErr)
+	}
+
+	for _, d := range domains {
+		if d.BaseDomain == pslDomain {
+			sub := ""
+			if pslDomain != host {
+				sub = strings.TrimSuffix(host, "."+pslDomain)
+			}
+			return sub, d.ID, nil
+		}
+	}
+
+	return "", "", fmt.Errorf("no matching Pangolin domain found for host %q (parsed domain: %q)", host, pslDomain)
+}
+
+// loadDomains returns the cached Pangolin domain list, fetching from the API
+// if the cache is empty. Domains are sorted by BaseDomain length descending
+// so that suffix matching prefers the longest (most specific) match.
+func (r *IngressReconciler) loadDomains(ctx context.Context) ([]pangolin.Domain, error) {
+	r.domainMu.RLock()
+	if r.domainCache != nil {
+		cached := r.domainCache
+		r.domainMu.RUnlock()
+		return cached, nil
+	}
+	r.domainMu.RUnlock()
+
+	domains, err := r.PangolinClient.ListDomains(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list Pangolin domains: %w", err)
+	}
+
+	// Sort by BaseDomain length descending so longest match wins
+	sort.Slice(domains, func(i, j int) bool {
+		return len(domains[i].BaseDomain) > len(domains[j].BaseDomain)
+	})
+
+	r.domainMu.Lock()
+	r.domainCache = domains
+	r.domainMu.Unlock()
+
+	return domains, nil
 }
 
 func (r *IngressReconciler) getSiteInfo(ctx context.Context) (*pangolin.Site, error) {
@@ -639,41 +699,6 @@ func (r *IngressReconciler) getSiteInfo(ctx context.Context) (*pangolin.Site, er
 	r.siteMu.Unlock()
 
 	return site, nil
-}
-
-func (r *IngressReconciler) resolveDomainID(ctx context.Context, baseDomain string) (string, error) {
-	r.domainMu.RLock()
-	if r.domainMap != nil {
-		if id, ok := r.domainMap[baseDomain]; ok {
-			r.domainMu.RUnlock()
-			return id, nil
-		}
-	}
-	r.domainMu.RUnlock()
-
-	domains, err := r.PangolinClient.ListDomains(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to list Pangolin domains: %w", err)
-	}
-
-	localMap := make(map[string]string, len(domains))
-	for _, d := range domains {
-		localMap[d.BaseDomain] = d.ID
-	}
-
-	r.domainMu.Lock()
-	if r.domainMap == nil {
-		r.domainMap = make(map[string]string, len(localMap))
-	}
-	for k, v := range localMap {
-		r.domainMap[k] = v
-	}
-	resolved, ok := r.domainMap[baseDomain]
-	r.domainMu.Unlock()
-	if !ok {
-		return "", fmt.Errorf("no Pangolin domain configured for %s", baseDomain)
-	}
-	return resolved, nil
 }
 
 func pathTypeToMatch(pt *networkingv1.PathType) string {
