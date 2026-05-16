@@ -223,9 +223,31 @@ The Pangolin Ingress Controller supports the following annotations on Ingress re
 | `pangolin.ingress.k8s.io/sso` | `bool` | *(unset)* | Enable or disable Pangolin SSO authentication for the resource |
 | `pangolin.ingress.k8s.io/ssl` | `bool` | *(unset)* | Enable or disable SSL termination |
 | `pangolin.ingress.k8s.io/block-access` | `bool` | *(unset)* | Block all access to the resource |
-| `pangolin.ingress.k8s.io/email-whitelist-enabled` | `bool` | *(unset)* | Enable email whitelist–based access control |
+| `pangolin.ingress.k8s.io/email-whitelist-enabled` | `bool` | *(unset)* | Enable email whitelist–based access control (must be paired with `email-whitelist` to populate the list) |
 | `pangolin.ingress.k8s.io/apply-rules` | `bool` | *(unset)* | Apply organization-level access rules to the resource |
 | `pangolin.ingress.k8s.io/enabled` | `bool` | *(unset)* | Enable or disable the Pangolin resource entirely |
+| `pangolin.ingress.k8s.io/skip-to-idp-id` | `int` | *(unset)* | Skip the Pangolin login page and redirect SSO directly to this configured Identity Provider ID |
+
+### Resource Auth Methods
+
+Per-resource auth that lives on dedicated Pangolin sub-endpoints. The controller reconciles each method independently and tolerates `404/405` from older Pangolin instances (logs a warning and skips the method).
+
+| Annotation | Type | Description |
+|------------|------|-------------|
+| `pangolin.ingress.k8s.io/email-whitelist` | `JSON` | JSON array of email addresses / wildcards (e.g. `*@example.com`). Replaces the resource's whitelist on change. Empty array `[]` clears it. Annotation absent = unmanaged. Max 50 entries. |
+| `pangolin.ingress.k8s.io/password-secret-ref` | `string` | Reference to a Kubernetes Secret containing the resource's shared password under key `password`. Format: `name` (Ingress namespace) or `namespace/name`. Removing the annotation clears the password. Pangolin requires 4–100 chars. |
+| `pangolin.ingress.k8s.io/pincode-secret-ref` | `string` | Reference to a Kubernetes Secret containing the resource's pincode under key `pincode`. Same ref format. Pangolin requires exactly 6 digits. |
+| `pangolin.ingress.k8s.io/role-ids` | `JSON` | JSON array of Pangolin role IDs (positive integers). Replaces the resource's role assignments. Find role IDs in the Pangolin UI or via the Pangolin API. |
+| `pangolin.ingress.k8s.io/user-ids` | `JSON` | JSON array of Pangolin user ID strings. Replaces the resource's user assignments. |
+
+#### Controller-managed
+
+These annotations are written by the controller and MUST NOT be edited by users — they exist purely for change detection and do not retrigger reconciliation when modified.
+
+| Annotation | Type | Description |
+|------------|------|-------------|
+| `pangolin.ingress.k8s.io/password-hash` | `string` | SHA-256 hash of the current password value, used to detect Secret changes without re-POSTing on every reconcile |
+| `pangolin.ingress.k8s.io/pincode-hash` | `string` | Same as above, for the pincode |
 
 ### Proxy Settings
 
@@ -341,6 +363,44 @@ spec:
             name: protected-service
             port:
               number: 443
+```
+
+### Example: Resource Password + Whitelist + Roles
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-shared-password
+  namespace: default
+stringData:
+  password: hunter2-secret
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gated-app
+  namespace: default
+  annotations:
+    pangolin.ingress.k8s.io/sso: "true"
+    pangolin.ingress.k8s.io/email-whitelist-enabled: "true"
+    pangolin.ingress.k8s.io/email-whitelist: '["alice@example.com","*@partner.com"]'
+    pangolin.ingress.k8s.io/password-secret-ref: "app-shared-password"
+    pangolin.ingress.k8s.io/role-ids: "[1,4]"
+    pangolin.ingress.k8s.io/skip-to-idp-id: "3"
+spec:
+  ingressClassName: pangolin
+  rules:
+  - host: gated.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: gated-service
+            port:
+              number: 8080
 ```
 
 ### Example: Health Checks

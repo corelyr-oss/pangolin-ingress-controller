@@ -33,11 +33,22 @@ The controller uses the following Pangolin API endpoints:
 
 - `POST /v1/resources` - Create a new resource
 - `GET /v1/resources/{id}` - Get resource details
-- `PUT /v1/resources/{id}` - Update a resource
+- `PUT /v1/resources/{id}` - Update a resource (accepts `skipToIdpId` to bypass the Pangolin login page and jump straight to a configured IdP)
 - `DELETE /v1/resources/{id}` - Delete a resource
 - `POST /v1/targets` - Create a new target
 - `GET /v1/resources/{id}/targets` - List targets for a resource
 - `DELETE /v1/targets/{id}` - Delete a target
+
+Per-resource auth sub-endpoints (optional; 404/405 is tolerated):
+
+- `POST /v1/resource/{id}/password` - Set/clear the resource's shared password (`{"password": "..." | null}`, 4–100 chars)
+- `POST /v1/resource/{id}/pincode` - Set/clear the resource's pincode (`{"pincode": "123456" | null}`, exactly 6 digits)
+- `GET /v1/resource/{id}/whitelist` - List current email whitelist entries
+- `POST /v1/resource/{id}/whitelist` - Replace the email whitelist (`{"emails": [...]}`, max 50)
+- `GET /v1/resource/{id}/roles` - List currently assigned role IDs
+- `POST /v1/resource/{id}/roles` - Replace role assignments (`{"roleIds": [...]}`, integer IDs)
+- `GET /v1/resource/{id}/users` - List currently assigned user IDs
+- `POST /v1/resource/{id}/users` - Replace user assignments (`{"userIds": [...]}`, string IDs)
 
 ### Authentication
 

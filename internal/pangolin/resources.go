@@ -68,6 +68,7 @@ type UpdateResourceRequest struct {
 	SetHostHeader         *string  `json:"setHostHeader,omitempty"`
 	Headers               []Header `json:"headers,omitempty"`
 	PostAuthPath          *string  `json:"postAuthPath,omitempty"`
+	SkipToIdpID           *int     `json:"skipToIdpId,omitempty"`
 }
 
 // CreateTargetRequest represents the request to create a target
@@ -459,4 +460,185 @@ func decodeData(body []byte, target interface{}) error {
 		return fmt.Errorf("failed to parse response data: %w", err)
 	}
 	return nil
+}
+
+// --- Auth sub-resource endpoints --------------------------------------------
+//
+// These endpoints are optional in older Pangolin versions; callers should
+// treat *NotImplementedError (HTTP 404/405) as "skip this auth method".
+
+// SetResourcePassword sets (password != nil) or clears (password == nil) the
+// resource shared password. Pangolin requires 4..100 chars when setting.
+func (c *Client) SetResourcePassword(ctx context.Context, resourceID string, password *string) error {
+	body := struct {
+		Password *string `json:"password"`
+	}{Password: password}
+	resp, err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%s/password", resourceID), body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkResponseWithNotImplemented(resp)
+}
+
+// SetResourcePincode sets (pincode != nil) or clears (pincode == nil) the
+// resource pincode. Pangolin requires exactly 6 digits when setting.
+func (c *Client) SetResourcePincode(ctx context.Context, resourceID string, pincode *string) error {
+	body := struct {
+		Pincode *string `json:"pincode"`
+	}{Pincode: pincode}
+	resp, err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%s/pincode", resourceID), body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkResponseWithNotImplemented(resp)
+}
+
+// GetResourceWhitelist returns the email entries currently on the resource's
+// whitelist. Items are lowercased by Pangolin.
+func (c *Client) GetResourceWhitelist(ctx context.Context, resourceID string) ([]string, error) {
+	resp, err := c.doRequest(ctx, http.MethodGet, fmt.Sprintf("/v1/resource/%s/whitelist", resourceID), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := checkResponseWithNotImplemented(resp); err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var payload struct {
+		Whitelist []struct {
+			Email string `json:"email"`
+		} `json:"whitelist"`
+	}
+	if err := decodeData(body, &payload); err != nil {
+		return nil, err
+	}
+	emails := make([]string, 0, len(payload.Whitelist))
+	for _, e := range payload.Whitelist {
+		emails = append(emails, e.Email)
+	}
+	return emails, nil
+}
+
+// SetResourceWhitelist replaces the resource's email whitelist. Pangolin
+// enforces max 50 entries and lowercases all values.
+func (c *Client) SetResourceWhitelist(ctx context.Context, resourceID string, emails []string) error {
+	if emails == nil {
+		emails = []string{}
+	}
+	body := struct {
+		Emails []string `json:"emails"`
+	}{Emails: emails}
+	resp, err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%s/whitelist", resourceID), body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkResponseWithNotImplemented(resp)
+}
+
+// ListResourceRoles returns the role IDs currently assigned to the resource.
+func (c *Client) ListResourceRoles(ctx context.Context, resourceID string) ([]int, error) {
+	resp, err := c.doRequest(ctx, http.MethodGet, fmt.Sprintf("/v1/resource/%s/roles", resourceID), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := checkResponseWithNotImplemented(resp); err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var payload struct {
+		Roles []struct {
+			RoleID int `json:"roleId"`
+		} `json:"roles"`
+	}
+	if err := decodeData(body, &payload); err != nil {
+		return nil, err
+	}
+	ids := make([]int, 0, len(payload.Roles))
+	for _, r := range payload.Roles {
+		ids = append(ids, r.RoleID)
+	}
+	return ids, nil
+}
+
+// SetResourceRoles replaces the resource's role assignments with the given
+// integer role IDs.
+func (c *Client) SetResourceRoles(ctx context.Context, resourceID string, roleIDs []int) error {
+	if roleIDs == nil {
+		roleIDs = []int{}
+	}
+	body := struct {
+		RoleIDs []int `json:"roleIds"`
+	}{RoleIDs: roleIDs}
+	resp, err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%s/roles", resourceID), body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkResponseWithNotImplemented(resp)
+}
+
+// ListResourceUsers returns the user IDs currently assigned to the resource.
+func (c *Client) ListResourceUsers(ctx context.Context, resourceID string) ([]string, error) {
+	resp, err := c.doRequest(ctx, http.MethodGet, fmt.Sprintf("/v1/resource/%s/users", resourceID), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := checkResponseWithNotImplemented(resp); err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var payload struct {
+		Users []struct {
+			UserID string `json:"userId"`
+		} `json:"users"`
+	}
+	if err := decodeData(body, &payload); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(payload.Users))
+	for _, u := range payload.Users {
+		ids = append(ids, u.UserID)
+	}
+	return ids, nil
+}
+
+// SetResourceUsers replaces the resource's user assignments with the given
+// Pangolin user ID strings.
+func (c *Client) SetResourceUsers(ctx context.Context, resourceID string, userIDs []string) error {
+	if userIDs == nil {
+		userIDs = []string{}
+	}
+	body := struct {
+		UserIDs []string `json:"userIds"`
+	}{UserIDs: userIDs}
+	resp, err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%s/users", resourceID), body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkResponseWithNotImplemented(resp)
 }

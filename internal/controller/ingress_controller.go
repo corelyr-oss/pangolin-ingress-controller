@@ -2,16 +2,20 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
+	"golang.org/x/net/publicsuffix"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -20,7 +24,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"golang.org/x/net/publicsuffix"
 
 	"github.com/vinzenz/pangolin-ingress-controller/internal/pangolin"
 )
@@ -35,6 +38,20 @@ const (
 	annotationBlockAccess           = "pangolin.ingress.k8s.io/block-access"
 	annotationEmailWhitelistEnabled = "pangolin.ingress.k8s.io/email-whitelist-enabled"
 	annotationApplyRules            = "pangolin.ingress.k8s.io/apply-rules"
+	annotationSkipToIdpID           = "pangolin.ingress.k8s.io/skip-to-idp-id"
+
+	// Auth method annotations
+	annotationEmailWhitelist    = "pangolin.ingress.k8s.io/email-whitelist"
+	annotationPasswordSecretRef = "pangolin.ingress.k8s.io/password-secret-ref"
+	annotationPincodeSecretRef  = "pangolin.ingress.k8s.io/pincode-secret-ref"
+	annotationRoleIDs           = "pangolin.ingress.k8s.io/role-ids"
+	annotationUserIDs           = "pangolin.ingress.k8s.io/user-ids"
+	annotationPasswordHash      = "pangolin.ingress.k8s.io/password-hash"
+	annotationPincodeHash       = "pangolin.ingress.k8s.io/pincode-hash"
+
+	// Secret keys read from a referenced Kubernetes Secret
+	secretKeyPassword = "password"
+	secretKeyPincode  = "pincode"
 
 	// Proxy settings annotations
 	annotationStickySession = "pangolin.ingress.k8s.io/sticky-session"
@@ -61,6 +78,20 @@ const (
 	annotationHCMethod            = "pangolin.ingress.k8s.io/healthcheck-method"
 	annotationHCStatus            = "pangolin.ingress.k8s.io/healthcheck-status"
 	annotationHCTLSServerName     = "pangolin.ingress.k8s.io/healthcheck-tls-server-name"
+)
+
+// controllerManagedAnnotations are annotations the controller writes itself.
+// Changes to these MUST NOT retrigger reconciliation, otherwise the controller
+// will spin in a write-watch loop.
+var controllerManagedAnnotations = map[string]struct{}{
+	annotationResourceID:   {},
+	annotationPasswordHash: {},
+	annotationPincodeHash:  {},
+}
+
+var (
+	errSecretNotFound   = errors.New("secret not found")
+	errSecretKeyMissing = errors.New("secret key missing")
 )
 
 // IngressReconciler reconciles an Ingress object
@@ -105,7 +136,7 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	ingress := &networkingv1.Ingress{}
 	err := r.Get(ctx, req.NamespacedName, ingress)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			// Ingress not found, could have been deleted
 			log.Info("Ingress resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
@@ -388,6 +419,7 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		SetHostHeader:         parseStringAnnotation(annotations, annotationSetHostHeader),
 		PostAuthPath:          postAuthPath,
 		Headers:               parseHeadersAnnotation(annotations, annotationHeaders),
+		SkipToIdpID:           parseIntAnnotation(annotations, annotationSkipToIdpID),
 	}
 
 	var resource *pangolin.Resource
@@ -551,7 +583,284 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		}
 	}
 
+	// Reconcile per-resource auth methods (password, pincode, whitelist, roles, users).
+	if err := r.reconcileResourceAuth(ctx, ingress, resourceID); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// getSecretValue fetches a single key from a Kubernetes Secret, returning
+// errSecretNotFound or errSecretKeyMissing for the two distinguishable
+// failure modes.
+func (r *IngressReconciler) getSecretValue(ctx context.Context, namespace, name, key string) (string, error) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", fmt.Errorf("%w: %s/%s", errSecretNotFound, namespace, name)
+		}
+		return "", fmt.Errorf("failed to get secret %s/%s: %w", namespace, name, err)
+	}
+	v, ok := secret.Data[key]
+	if !ok {
+		return "", fmt.Errorf("%w: secret %s/%s has no key %q", errSecretKeyMissing, namespace, name, key)
+	}
+	return string(v), nil
+}
+
+// hashSecretValue computes a stable change-detection hash over the resource ID
+// (acts as a per-resource salt) and the secret value. Not intended as a
+// password hash for security — just to detect when the user changed the value.
+func hashSecretValue(resourceID, value string) string {
+	h := sha256.Sum256([]byte(resourceID + ":" + value))
+	return hex.EncodeToString(h[:])
+}
+
+// setManagedAnnotation writes a controller-managed annotation onto the Ingress
+// and persists it. The annotation key must be in controllerManagedAnnotations
+// so it doesn't re-trigger reconciliation.
+func (r *IngressReconciler) setManagedAnnotation(ctx context.Context, ingress *networkingv1.Ingress, key, value string) error {
+	if ingress.Annotations == nil {
+		ingress.Annotations = map[string]string{}
+	}
+	if ingress.Annotations[key] == value {
+		return nil
+	}
+	ingress.Annotations[key] = value
+	return r.Update(ctx, ingress)
+}
+
+// clearManagedAnnotation removes a controller-managed annotation if present.
+func (r *IngressReconciler) clearManagedAnnotation(ctx context.Context, ingress *networkingv1.Ingress, key string) error {
+	if _, ok := ingress.Annotations[key]; !ok {
+		return nil
+	}
+	delete(ingress.Annotations, key)
+	return r.Update(ctx, ingress)
+}
+
+// reconcileResourceAuth reconciles the per-resource auth methods that live on
+// separate Pangolin endpoints (password, pincode, email whitelist, role
+// assignments, user assignments). 404/405 from any sub-endpoint is logged and
+// the sub-step is skipped — older Pangolin instances may not have the route.
+func (r *IngressReconciler) reconcileResourceAuth(ctx context.Context, ingress *networkingv1.Ingress, resourceID string) error {
+	if resourceID == "" {
+		return nil
+	}
+	if err := r.reconcilePassword(ctx, ingress, resourceID); err != nil {
+		return err
+	}
+	if err := r.reconcilePincode(ctx, ingress, resourceID); err != nil {
+		return err
+	}
+	if err := r.reconcileWhitelist(ctx, ingress, resourceID); err != nil {
+		return err
+	}
+	if err := r.reconcileRoles(ctx, ingress, resourceID); err != nil {
+		return err
+	}
+	if err := r.reconcileUsers(ctx, ingress, resourceID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *IngressReconciler) reconcilePassword(ctx context.Context, ingress *networkingv1.Ingress, resourceID string) error {
+	return r.reconcileSecretBackedAuth(
+		ctx, ingress, resourceID,
+		annotationPasswordSecretRef, annotationPasswordHash, secretKeyPassword,
+		"password",
+		r.PangolinClient.SetResourcePassword,
+	)
+}
+
+func (r *IngressReconciler) reconcilePincode(ctx context.Context, ingress *networkingv1.Ingress, resourceID string) error {
+	return r.reconcileSecretBackedAuth(
+		ctx, ingress, resourceID,
+		annotationPincodeSecretRef, annotationPincodeHash, secretKeyPincode,
+		"pincode",
+		r.PangolinClient.SetResourcePincode,
+	)
+}
+
+// reconcileSecretBackedAuth implements the convergent state machine shared by
+// password and pincode: annotation absent + hash absent → no-op; annotation
+// present + hash matches → no-op; annotation present + hash stale or absent →
+// set + write hash; annotation absent + hash present → clear + remove hash.
+func (r *IngressReconciler) reconcileSecretBackedAuth(
+	ctx context.Context,
+	ingress *networkingv1.Ingress,
+	resourceID string,
+	refAnnotation, hashAnnotation, secretKey, label string,
+	setFn func(context.Context, string, *string) error,
+) error {
+	log := log.FromContext(ctx).WithValues("authMethod", label, "resourceID", resourceID)
+	annotations := ingress.Annotations
+	refValue := annotations[refAnnotation]
+	storedHash := annotations[hashAnnotation]
+
+	if refValue == "" {
+		if storedHash == "" {
+			return nil
+		}
+		if err := setFn(ctx, resourceID, nil); err != nil {
+			if pangolin.IsNotImplemented(err) {
+				log.Info("Pangolin endpoint not available; skipping clear", "error", err)
+				return nil
+			}
+			return fmt.Errorf("failed to clear %s: %w", label, err)
+		}
+		log.Info("Cleared resource " + label)
+		return r.clearManagedAnnotation(ctx, ingress, hashAnnotation)
+	}
+
+	ns, name, ok := parseSecretRef(refValue, ingress.Namespace)
+	if !ok {
+		return fmt.Errorf("annotation %q has invalid Secret reference %q", refAnnotation, refValue)
+	}
+	value, err := r.getSecretValue(ctx, ns, name, secretKey)
+	if err != nil {
+		return err
+	}
+	desiredHash := hashSecretValue(resourceID, value)
+	if desiredHash == storedHash {
+		return nil
+	}
+	if err := setFn(ctx, resourceID, &value); err != nil {
+		if pangolin.IsNotImplemented(err) {
+			log.Info("Pangolin endpoint not available; skipping set", "error", err)
+			return nil
+		}
+		return fmt.Errorf("failed to set %s: %w", label, err)
+	}
+	log.Info("Set resource " + label)
+	return r.setManagedAnnotation(ctx, ingress, hashAnnotation, desiredHash)
+}
+
+func (r *IngressReconciler) reconcileWhitelist(ctx context.Context, ingress *networkingv1.Ingress, resourceID string) error {
+	log := log.FromContext(ctx).WithValues("authMethod", "whitelist", "resourceID", resourceID)
+	desired, err := parseStringSliceAnnotation(ingress.Annotations, annotationEmailWhitelist)
+	if err != nil {
+		return err
+	}
+	if desired == nil {
+		return nil
+	}
+	current, err := r.PangolinClient.GetResourceWhitelist(ctx, resourceID)
+	if err != nil {
+		if pangolin.IsNotImplemented(err) {
+			log.Info("Pangolin endpoint not available; skipping whitelist", "error", err)
+			return nil
+		}
+		return fmt.Errorf("failed to get current whitelist: %w", err)
+	}
+	if stringSetsEqual(current, desired) {
+		return nil
+	}
+	if err := r.PangolinClient.SetResourceWhitelist(ctx, resourceID, desired); err != nil {
+		if pangolin.IsNotImplemented(err) {
+			log.Info("Pangolin endpoint not available; skipping whitelist set", "error", err)
+			return nil
+		}
+		return fmt.Errorf("failed to set whitelist: %w", err)
+	}
+	log.Info("Updated resource whitelist", "count", len(desired))
+	return nil
+}
+
+func (r *IngressReconciler) reconcileRoles(ctx context.Context, ingress *networkingv1.Ingress, resourceID string) error {
+	log := log.FromContext(ctx).WithValues("authMethod", "roles", "resourceID", resourceID)
+	desired, err := parseIntSliceAnnotation(ingress.Annotations, annotationRoleIDs)
+	if err != nil {
+		return err
+	}
+	if desired == nil {
+		return nil
+	}
+	current, err := r.PangolinClient.ListResourceRoles(ctx, resourceID)
+	if err != nil {
+		if pangolin.IsNotImplemented(err) {
+			log.Info("Pangolin endpoint not available; skipping roles", "error", err)
+			return nil
+		}
+		return fmt.Errorf("failed to list current roles: %w", err)
+	}
+	if intSetsEqual(current, desired) {
+		return nil
+	}
+	if err := r.PangolinClient.SetResourceRoles(ctx, resourceID, desired); err != nil {
+		if pangolin.IsNotImplemented(err) {
+			log.Info("Pangolin endpoint not available; skipping roles set", "error", err)
+			return nil
+		}
+		return fmt.Errorf("failed to set roles: %w", err)
+	}
+	log.Info("Updated resource roles", "count", len(desired))
+	return nil
+}
+
+func (r *IngressReconciler) reconcileUsers(ctx context.Context, ingress *networkingv1.Ingress, resourceID string) error {
+	log := log.FromContext(ctx).WithValues("authMethod", "users", "resourceID", resourceID)
+	desired, err := parseStringSliceAnnotation(ingress.Annotations, annotationUserIDs)
+	if err != nil {
+		return err
+	}
+	if desired == nil {
+		return nil
+	}
+	current, err := r.PangolinClient.ListResourceUsers(ctx, resourceID)
+	if err != nil {
+		if pangolin.IsNotImplemented(err) {
+			log.Info("Pangolin endpoint not available; skipping users", "error", err)
+			return nil
+		}
+		return fmt.Errorf("failed to list current users: %w", err)
+	}
+	if stringSetsEqual(current, desired) {
+		return nil
+	}
+	if err := r.PangolinClient.SetResourceUsers(ctx, resourceID, desired); err != nil {
+		if pangolin.IsNotImplemented(err) {
+			log.Info("Pangolin endpoint not available; skipping users set", "error", err)
+			return nil
+		}
+		return fmt.Errorf("failed to set users: %w", err)
+	}
+	log.Info("Updated resource users", "count", len(desired))
+	return nil
+}
+
+func stringSetsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		set[s] = struct{}{}
+	}
+	for _, s := range b {
+		if _, ok := set[s]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func intSetsEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[int]struct{}, len(a))
+	for _, n := range a {
+		set[n] = struct{}{}
+	}
+	for _, n := range b {
+		if _, ok := set[n]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // findExistingResource searches for an existing Pangolin resource matching the
@@ -763,6 +1072,59 @@ func parseHeadersAnnotation(annotations map[string]string, key string) []pangoli
 	return headers
 }
 
+// parseStringSliceAnnotation returns nil when the annotation is absent, an
+// empty (non-nil) slice when the value is "[]", and the parsed slice otherwise.
+// Returns (nil, error) when the value is present but cannot be parsed.
+func parseStringSliceAnnotation(annotations map[string]string, key string) ([]string, error) {
+	v, ok := annotations[key]
+	if !ok {
+		return nil, nil
+	}
+	if strings.TrimSpace(v) == "" {
+		return nil, nil
+	}
+	out := []string{}
+	if err := json.Unmarshal([]byte(v), &out); err != nil {
+		return nil, fmt.Errorf("annotation %q is not a JSON array of strings: %w", key, err)
+	}
+	return out, nil
+}
+
+// parseIntSliceAnnotation mirrors parseStringSliceAnnotation for integers.
+func parseIntSliceAnnotation(annotations map[string]string, key string) ([]int, error) {
+	v, ok := annotations[key]
+	if !ok {
+		return nil, nil
+	}
+	if strings.TrimSpace(v) == "" {
+		return nil, nil
+	}
+	out := []int{}
+	if err := json.Unmarshal([]byte(v), &out); err != nil {
+		return nil, fmt.Errorf("annotation %q is not a JSON array of integers: %w", key, err)
+	}
+	return out, nil
+}
+
+// parseSecretRef parses a "name" or "namespace/name" Secret reference,
+// defaulting the namespace to defaultNamespace when not specified.
+// Returns ok=false when value is empty.
+func parseSecretRef(value, defaultNamespace string) (namespace, name string, ok bool) {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return "", "", false
+	}
+	if i := strings.Index(v, "/"); i >= 0 {
+		ns := strings.TrimSpace(v[:i])
+		nm := strings.TrimSpace(v[i+1:])
+		if ns == "" || nm == "" || strings.Contains(nm, "/") {
+			return "", "", false
+		}
+		return ns, nm, true
+	}
+	return defaultNamespace, v, true
+}
+
 // pangolinAnnotationChangedPredicate triggers reconciliation when any
 // pangolin.ingress.k8s.io/* annotation changes EXCEPT the controller-managed
 // resource-id annotation (which the controller itself writes).
@@ -777,7 +1139,7 @@ func (p pangolinAnnotationChangedPredicate) Update(e event.UpdateEvent) bool {
 	oldAnn := e.ObjectOld.GetAnnotations()
 	newAnn := e.ObjectNew.GetAnnotations()
 	for key, newVal := range newAnn {
-		if key == annotationResourceID {
+		if _, managed := controllerManagedAnnotations[key]; managed {
 			continue
 		}
 		if !strings.HasPrefix(key, "pangolin.ingress.k8s.io/") {
@@ -789,7 +1151,7 @@ func (p pangolinAnnotationChangedPredicate) Update(e event.UpdateEvent) bool {
 	}
 	// Check for removed pangolin annotations
 	for key := range oldAnn {
-		if key == annotationResourceID {
+		if _, managed := controllerManagedAnnotations[key]; managed {
 			continue
 		}
 		if !strings.HasPrefix(key, "pangolin.ingress.k8s.io/") {

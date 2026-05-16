@@ -85,6 +85,23 @@ func IsConflict(err error) bool {
 	return ok
 }
 
+// NotImplementedError is returned when an endpoint is not available on the
+// connected Pangolin instance (HTTP 404 or 405). This lets callers tolerate
+// older Pangolin versions that lack newer auth sub-endpoints.
+type NotImplementedError struct {
+	Message string
+}
+
+func (e *NotImplementedError) Error() string {
+	return e.Message
+}
+
+// IsNotImplemented returns true if the error is a 404/405 from Pangolin.
+func IsNotImplemented(err error) bool {
+	_, ok := err.(*NotImplementedError)
+	return ok
+}
+
 // checkResponse checks the HTTP response for errors
 func checkResponse(resp *http.Response) error {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -97,4 +114,16 @@ func checkResponse(resp *http.Response) error {
 		return &ConflictError{Message: msg}
 	}
 	return fmt.Errorf("%s", msg)
+}
+
+// checkResponseWithNotImplemented behaves like checkResponse but additionally
+// maps 404/405 to *NotImplementedError. Use this on the optional auth
+// sub-endpoints (password, pincode, whitelist, roles, users) where an older
+// Pangolin instance may not expose the route.
+func checkResponseWithNotImplemented(resp *http.Response) error {
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		body, _ := io.ReadAll(resp.Body)
+		return &NotImplementedError{Message: fmt.Sprintf("API request failed with status %d: %s", resp.StatusCode, string(body))}
+	}
+	return checkResponse(resp)
 }

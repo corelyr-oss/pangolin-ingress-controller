@@ -18,12 +18,12 @@ func TestMatchHostToDomains(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		host          string
-		domains       []pangolin.Domain
-		wantSub       string
-		wantDomainID  string
-		wantMatched   bool
+		name         string
+		host         string
+		domains      []pangolin.Domain
+		wantSub      string
+		wantDomainID string
+		wantMatched  bool
 	}{
 		{
 			name:         "simple subdomain match",
