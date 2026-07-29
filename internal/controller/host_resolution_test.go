@@ -124,7 +124,7 @@ func TestMatchHostToDomains(t *testing.T) {
 }
 
 func TestResolveHostDomain(t *testing.T) {
-	// Pre-sorted longest first (as loadDomains returns)
+	// Pre-sorted longest first (as the domain cache stores them)
 	cachedDomains := []pangolin.Domain{
 		{ID: "id-example-co-uk", BaseDomain: "example.co.uk"},
 		{ID: "id-example-com", BaseDomain: "example.com"},
@@ -199,8 +199,10 @@ func TestResolveHostDomain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Refresh disabled so these cases exercise pure matching against a
+			// warm cache, with no API involvement.
 			r := &IngressReconciler{
-				domainCache: tt.domainCache,
+				domains: warmDomainCache(tt.domainCache, 0),
 			}
 
 			sub, domainID, err := r.resolveHostDomain(context.Background(), tt.host)

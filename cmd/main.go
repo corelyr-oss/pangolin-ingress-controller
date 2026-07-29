@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -37,6 +38,7 @@ func main() {
 	var pangolinOrgID string
 	var pangolinSiteNiceID string
 	var resourcePrefix string
+	var domainCacheRefreshInterval time.Duration
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -50,6 +52,10 @@ func main() {
 	flag.StringVar(&pangolinOrgID, "pangolin-org-id", "", "The organization identifier in Pangolin.")
 	flag.StringVar(&pangolinSiteNiceID, "pangolin-site-nice-id", "", "The Pangolin site nice ID to attach resources/targets to.")
 	flag.StringVar(&resourcePrefix, "resource-prefix", "pangolin-controller", "Prefix for Pangolin resource names.")
+	flag.DurationVar(&domainCacheRefreshInterval, "domain-cache-refresh-interval", 60*time.Second,
+		"How often at most the Pangolin domain list may be refetched after a host fails to resolve. "+
+			"Bounds how long a newly registered Pangolin domain stays unresolvable. Set to 0 to disable "+
+			"refreshing, in which case a controller restart is required to pick up new domains.")
 
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
@@ -88,6 +94,8 @@ func main() {
 		APIKeyNamespace: pangolinAPIKeyNamespace,
 		OrgID:           pangolinOrgID,
 		SiteNiceID:      pangolinSiteNiceID,
+
+		DomainCacheRefreshInterval: domainCacheRefreshInterval,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Ingress")
 		os.Exit(1)

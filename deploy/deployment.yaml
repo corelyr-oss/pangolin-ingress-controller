@@ -34,6 +34,10 @@ spec:
         - --pangolin-base-url=https://api.pangolin.net
         - --pangolin-api-key-secret=pangolin-api-key
         - --pangolin-api-key-namespace=pangolin-system
+        # How often at most the Pangolin domain list is refetched after a host
+        # fails to resolve. Bounds how long a newly registered domain stays
+        # unresolvable. Set to 0 to require a restart instead.
+        - --domain-cache-refresh-interval=60s
         env:
         - name: PANGOLIN_BASE_URL
           value: "https://api.pangolin.net"

@@ -447,6 +447,7 @@ The controller accepts the following command-line arguments:
 | `--pangolin-org-id` | _none_ | **Required** Pangolin organization identifier (e.g. `tunnel-tf`) |
 | `--pangolin-site-nice-id` | _none_ | **Required** Pangolin site nice ID that should host created targets |
 | `--resource-prefix` | `pangolin-controller` | Prefix for Pangolin resource names (resources are named `{prefix}-{host}`) |
+| `--domain-cache-refresh-interval` | `60s` | How often at most the Pangolin domain list is refetched after an Ingress host fails to match. Bounds how long a domain registered after controller startup stays unresolvable. `0` disables refreshing (restart required to pick up new domains) |
 | `--metrics-bind-address` | `:8080` | Address for Prometheus metrics endpoint |
 | `--health-probe-bind-address` | `:8081` | Address for health/readiness probes |
 | `--leader-elect` | `false` | Enable leader election for HA |
@@ -532,6 +533,9 @@ kubectl logs -n pangolin-system \
 1. **Ingress not being reconciled**: Ensure the IngressClass is set to `pangolin`
 2. **Service not found errors**: Verify the backend service exists in the same namespace
 3. **TLS secret errors**: Check that the secret exists and contains valid certificate data
+4. **`no matching Pangolin domain` / `DomainNotFound` event**: The Ingress host does not correspond to any domain registered in your Pangolin org. Check with `kubectl describe ingress <name>`; the message reports how many domains the controller knows and when it last refreshed the list. The controller refetches the domain list automatically (see `--domain-cache-refresh-interval`), so a domain you *just* registered resolves within one interval without a restart — if it still does not resolve after that, the domain is genuinely absent or unverified in Pangolin.
+
+> **Note on monitoring**: an unresolvable host is reported as a Warning `DomainNotFound` event and a bounded requeue, **not** as a reconcile error. It therefore does not increment `controller_runtime_reconcile_errors_total`. If you alert on that metric to catch misconfigured hosts, alert on the event instead.
 
 ### Debug Mode
 

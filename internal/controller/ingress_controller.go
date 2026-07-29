@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/publicsuffix"
 	corev1 "k8s.io/api/core/v1"
@@ -18,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -92,7 +93,17 @@ var controllerManagedAnnotations = map[string]struct{}{
 var (
 	errSecretNotFound   = errors.New("secret not found")
 	errSecretKeyMissing = errors.New("secret key missing")
+
+	// errDomainNotFound marks a host that matches no Pangolin domain even after
+	// the domain list has been refreshed. It is an expected, operator-fixable
+	// condition rather than a controller fault, so Reconcile requeues on it
+	// instead of returning an error. Callers must wrap it with %w.
+	errDomainNotFound = errors.New("no matching Pangolin domain")
 )
+
+// reasonDomainNotFound is the Event reason recorded on an Ingress whose host
+// cannot be resolved to a Pangolin domain.
+const reasonDomainNotFound = "DomainNotFound"
 
 // IngressReconciler reconciles an Ingress object
 type IngressReconciler struct {
@@ -106,10 +117,15 @@ type IngressReconciler struct {
 	APIKeyNamespace string
 	OrgID           string
 	SiteNiceID      string
-	domainMu        sync.RWMutex
-	domainCache     []pangolin.Domain
-	siteMu          sync.RWMutex
-	siteCache       *pangolin.Site
+	Recorder        record.EventRecorder
+
+	// DomainCacheRefreshInterval bounds how often the Pangolin domain list is
+	// refetched after a host fails to resolve. Zero disables refresh-on-miss.
+	DomainCacheRefreshInterval time.Duration
+
+	domains   *domainCache
+	siteMu    sync.RWMutex
+	siteCache *pangolin.Site
 }
 
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;update;patch
@@ -118,6 +134,7 @@ type IngressReconciler struct {
 //+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -182,6 +199,20 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Process ingress rules and create/update Pangolin resources
 	if err := r.processIngressRules(ctx, ingress); err != nil {
+		if errors.Is(err, errDomainNotFound) {
+			// Expected and operator-fixable: the host is not a registered
+			// Pangolin domain. Retry on a bounded cadence rather than letting
+			// controller-runtime's exponential backoff climb toward minutes,
+			// which would make recovery time after registering the domain
+			// unpredictable. Logged at info — this is not a controller fault.
+			requeueAfter := r.domainRequeueAfter()
+			log.Info("Host does not match any Pangolin domain; will retry",
+				"reason", err.Error(), "requeueAfter", requeueAfter)
+			if r.Recorder != nil {
+				r.Recorder.Event(ingress, corev1.EventTypeWarning, reasonDomainNotFound, err.Error())
+			}
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
+		}
 		log.Error(err, "Failed to process ingress rules")
 		return ctrl.Result{}, err
 	}
@@ -359,9 +390,23 @@ func (r *IngressReconciler) initPangolinClient(ctx context.Context) error {
 	}
 
 	r.PangolinClient = pangolin.NewClient(r.PangolinBaseURL, string(apiKey), r.OrgID)
-	log.Info("Initialized Pangolin client", "baseURL", r.PangolinBaseURL)
+	r.domains = newDomainCache(r.PangolinClient, r.DomainCacheRefreshInterval)
+	log.Info("Initialized Pangolin client", "baseURL", r.PangolinBaseURL,
+		"domainCacheRefreshInterval", r.DomainCacheRefreshInterval)
 
 	return nil
+}
+
+// domainRequeueAfter is the retry delay for a host that matches no Pangolin
+// domain. A small margin is added over the refresh interval so a requeue never
+// lands fractionally before the cooldown expires, which would waste a cycle
+// skipping the refetch it came back to perform.
+func (r *IngressReconciler) domainRequeueAfter() time.Duration {
+	interval := r.DomainCacheRefreshInterval
+	if interval <= 0 {
+		interval = defaultDomainCacheRefreshInterval
+	}
+	return interval + interval/10
 }
 
 // createOrUpdatePangolinResource creates or updates a Pangolin resource for an ingress rule
@@ -922,26 +967,69 @@ func matchHostToDomains(host string, domains []pangolin.Domain) (subdomain, doma
 // domains by suffix, with the longest match winning. If no Pangolin domain
 // matches, it falls back to the Public Suffix List to parse the domain.
 func (r *IngressReconciler) resolveHostDomain(ctx context.Context, host string) (subdomain, domainID string, err error) {
+	log := log.FromContext(ctx)
+
 	host = strings.TrimSpace(host)
 	if host == "" {
 		return "", "", fmt.Errorf("empty host")
 	}
+	if r.domains == nil {
+		return "", "", fmt.Errorf("domain cache is not initialized")
+	}
 
-	domains, err := r.loadDomains(ctx)
+	domains, err := r.domains.get(ctx)
 	if err != nil {
 		return "", "", err
 	}
 
-	// Try API-first matching (domains are sorted longest-first)
-	if sub, id, ok := matchHostToDomains(host, domains); ok {
+	if sub, id, ok := matchHost(host, domains); ok {
 		return sub, id, nil
 	}
 
-	// Fallback: use Public Suffix List to extract the registrable domain,
-	// then try an exact lookup against the cached Pangolin domains.
+	// A miss may simply mean the cache predates a domain registered in Pangolin
+	// after this process started. Refetch (rate-limited) and retry before
+	// declaring the host unresolvable, so the controller self-heals instead of
+	// failing until someone restarts the pod.
+	refreshed, didRefresh, refreshErr := r.domains.refreshIfStale(ctx)
+	switch {
+	case refreshErr != nil:
+		// Keep serving the existing cache. The resolution failure below is the
+		// error the operator can act on; this one is context.
+		log.Error(refreshErr, "Failed to refresh Pangolin domain list", "host", host)
+	case didRefresh:
+		log.Info("Refreshed Pangolin domain list after resolution miss", "host", host, "domains", len(refreshed))
+		log.V(1).Info("Known Pangolin domains", "domains", baseDomains(refreshed))
+		if sub, id, ok := matchHost(host, refreshed); ok {
+			return sub, id, nil
+		}
+	}
+
+	count, lastRefresh := r.domains.describe()
+	detail := ""
+	if pslDomain, pslErr := publicsuffix.EffectiveTLDPlusOne(host); pslErr != nil {
+		detail = fmt.Sprintf(", PSL fallback failed: %v", pslErr)
+	} else {
+		detail = fmt.Sprintf(" (parsed domain: %q)", pslDomain)
+	}
+
+	return "", "", fmt.Errorf("%w for host %q%s: %d Pangolin domains known, list last refreshed %s",
+		errDomainNotFound, host, detail, count, lastRefresh)
+}
+
+// matchHost resolves a host against a domain list: first by longest suffix
+// match, then by exact match against the registrable domain derived from the
+// Public Suffix List.
+func matchHost(host string, domains []pangolin.Domain) (subdomain, domainID string, ok bool) {
+	// API-first matching (domains are sorted longest-first)
+	if sub, id, matched := matchHostToDomains(host, domains); matched {
+		return sub, id, true
+	}
+
+	// Fallback: use the Public Suffix List to extract the registrable domain,
+	// then try an exact lookup against the known Pangolin domains.
 	pslDomain, pslErr := publicsuffix.EffectiveTLDPlusOne(host)
 	if pslErr != nil {
-		return "", "", fmt.Errorf("no matching Pangolin domain found for host %q and PSL fallback failed: %w", host, pslErr)
+		return "", "", false
 	}
 
 	for _, d := range domains {
@@ -950,40 +1038,11 @@ func (r *IngressReconciler) resolveHostDomain(ctx context.Context, host string) 
 			if pslDomain != host {
 				sub = strings.TrimSuffix(host, "."+pslDomain)
 			}
-			return sub, d.ID, nil
+			return sub, d.ID, true
 		}
 	}
 
-	return "", "", fmt.Errorf("no matching Pangolin domain found for host %q (parsed domain: %q)", host, pslDomain)
-}
-
-// loadDomains returns the cached Pangolin domain list, fetching from the API
-// if the cache is empty. Domains are sorted by BaseDomain length descending
-// so that suffix matching prefers the longest (most specific) match.
-func (r *IngressReconciler) loadDomains(ctx context.Context) ([]pangolin.Domain, error) {
-	r.domainMu.RLock()
-	if r.domainCache != nil {
-		cached := r.domainCache
-		r.domainMu.RUnlock()
-		return cached, nil
-	}
-	r.domainMu.RUnlock()
-
-	domains, err := r.PangolinClient.ListDomains(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list Pangolin domains: %w", err)
-	}
-
-	// Sort by BaseDomain length descending so longest match wins
-	sort.Slice(domains, func(i, j int) bool {
-		return len(domains[i].BaseDomain) > len(domains[j].BaseDomain)
-	})
-
-	r.domainMu.Lock()
-	r.domainCache = domains
-	r.domainMu.Unlock()
-
-	return domains, nil
+	return "", "", false
 }
 
 func (r *IngressReconciler) getSiteInfo(ctx context.Context) (*pangolin.Site, error) {
@@ -1166,6 +1225,9 @@ func (p pangolinAnnotationChangedPredicate) Update(e event.UpdateEvent) bool {
 
 // SetupWithManager sets up the controller with the Manager
 func (r *IngressReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("pangolin-ingress-controller")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkingv1.Ingress{}).
 		WithEventFilter(predicate.Or(

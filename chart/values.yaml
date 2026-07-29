@@ -44,6 +44,12 @@ controller:
   metricsBindAddress: ":8080"
   # Health probe bind address
   healthProbeBindAddress: ":8081"
+  # How often at most the Pangolin domain list may be refetched after an
+  # Ingress host fails to match any known domain. This bounds how long a
+  # domain registered in Pangolin after controller startup stays unresolvable.
+  # Set to 0 to disable refreshing, in which case a controller restart is
+  # required to pick up newly registered domains.
+  domainCacheRefreshInterval: 60s
   # Log level: info, debug, error (or integer: 0=info, 1=debug, 2=trace)
   logLevel: info
 
