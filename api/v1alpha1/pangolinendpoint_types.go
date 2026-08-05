@@ -33,8 +33,9 @@ const (
 	ConditionProgrammed = "Programmed"
 
 	// ConditionReady summarises whether the endpoint is usable. It is False
-	// with reason NoPrincipalsGranted for an endpoint that exists but grants
-	// access to nobody.
+	// with reason NoPrincipalsGranted for an endpoint that names no principal
+	// of its own -- such an endpoint is still reachable by organisation
+	// administrators, through the role Pangolin grants implicitly.
 	ConditionReady = "Ready"
 )
 
@@ -44,6 +45,7 @@ const (
 	ReasonAliasSuffixNotConfigured = "AliasSuffixNotConfigured"
 	ReasonIdentityInvalid          = "IdentityInvalid"
 	ReasonIdentityTooLong          = "IdentityTooLong"
+	ReasonIdentityAmbiguous        = "IdentityAmbiguous"
 	ReasonUnsupportedByServer      = "UnsupportedByServer"
 	ReasonBackendNotFound          = "BackendNotFound"
 	ReasonBackendUnsupported       = "BackendUnsupported"
@@ -102,14 +104,20 @@ type EndpointPort struct {
 // controller resolves the names and reports an unknown or ambiguous name on
 // the ResolvedRefs condition.
 //
-// An endpoint that names no principals is created, but is reachable by nobody
-// and is reported Ready=False with reason NoPrincipalsGranted.
+// An endpoint that names no principals is created and reported Ready=False
+// with reason NoPrincipalsGranted. It is not unreachable: Pangolin grants its
+// organisation administrator role to every private resource by itself.
 type AccessSpec struct {
 	// Clients are Pangolin client names.
 	// +optional
 	Clients []string `json:"clients,omitempty"`
 
 	// Roles are Pangolin role names.
+	//
+	// Pangolin attaches the organisation's administrator role to every private
+	// resource on its own, and does not allow it to be withdrawn. That role is
+	// therefore outside this list's control: naming it here is accepted but
+	// changes nothing, and leaving it out does not remove it.
 	// +optional
 	Roles []string `json:"roles,omitempty"`
 
@@ -125,6 +133,15 @@ type PrivateEndpointSpec struct {
 	// derived as <name>.<namespace>.<suffix> from the controller's configured
 	// alias suffix; the controller refuses to derive an alias when no suffix
 	// is configured.
+	//
+	// Pangolin requires a fully qualified name and rejects a bare label, so the
+	// pattern demands at least two labels -- otherwise the resource is admitted
+	// here and then fails against Pangolin on every reconcile, forever. The
+	// wildcard and glob forms Pangolin documents (*.example.com,
+	// host-0?.example.internal) are permitted: validation stricter than the
+	// server would reject configurations that actually work.
+	//
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9*?_-]+(\.[a-zA-Z0-9*?_-]+)+$`
 	// +optional
 	Alias string `json:"alias,omitempty"`
 
@@ -209,6 +226,13 @@ type PangolinEndpointStatus struct {
 	// +optional
 	Address string `json:"address,omitempty"`
 
+	// AssignedAddress is the mesh address Pangolin assigned to the alias. The
+	// alias is what an operator configures; this is what it resolves to, and
+	// it is reported separately rather than replacing Address so that anything
+	// already reading Address keeps seeing the same kind of value.
+	// +optional
+	AssignedAddress string `json:"assignedAddress,omitempty"`
+
 	// ResolvedPorts is the port set that was sent to Pangolin.
 	// +optional
 	ResolvedPorts *ResolvedPorts `json:"resolvedPorts,omitempty"`
@@ -234,6 +258,7 @@ type PangolinEndpointStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=pgep
 // +kubebuilder:printcolumn:name="Address",type=string,JSONPath=`.status.address`
+// +kubebuilder:printcolumn:name="Assigned",type=string,JSONPath=`.status.assignedAddress`
 // +kubebuilder:printcolumn:name="Ports",type=string,JSONPath=`.status.resolvedPorts.tcp`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

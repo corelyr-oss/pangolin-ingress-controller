@@ -440,12 +440,12 @@ entrypoint at all, reachable only by clients connected to the Pangolin mesh at
 an internal FQDN. Those are declared with the `PangolinEndpoint` custom
 resource.
 
-> **Alpha.** `pangolin.ingress.k8s.io/v1alpha1` may change in
+> **Alpha.** `pangolin.corelyr.com/v1alpha1` may change in
 > backwards-incompatible ways. Only the private branch is implemented;
 > `spec.public` is reserved and rejected.
 
 ```yaml
-apiVersion: pangolin.ingress.k8s.io/v1alpha1
+apiVersion: pangolin.corelyr.com/v1alpha1
 kind: PangolinEndpoint
 metadata:
   name: postgres

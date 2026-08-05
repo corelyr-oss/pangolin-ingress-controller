@@ -5,9 +5,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.17.3
-  name: pangolinendpoints.pangolin.ingress.k8s.io
+  name: pangolinendpoints.pangolin.corelyr.com
 spec:
-  group: pangolin.ingress.k8s.io
+  group: pangolin.corelyr.com
   names:
     kind: PangolinEndpoint
     listKind: PangolinEndpointList
@@ -20,6 +20,9 @@ spec:
   - additionalPrinterColumns:
     - jsonPath: .status.address
       name: Address
+      type: string
+    - jsonPath: .status.assignedAddress
+      name: Assigned
       type: string
     - jsonPath: .status.resolvedPorts.tcp
       name: Ports
@@ -85,7 +88,13 @@ spec:
                           type: string
                         type: array
                       roles:
-                        description: Roles are Pangolin role names.
+                        description: |-
+                          Roles are Pangolin role names.
+
+                          Pangolin attaches the organisation's administrator role to every private
+                          resource on its own, and does not allow it to be withdrawn. That role is
+                          therefore outside this list's control: naming it here is accepted but
+                          changes nothing, and leaving it out does not remove it.
                         items:
                           type: string
                         type: array
@@ -101,6 +110,14 @@ spec:
                       derived as <name>.<namespace>.<suffix> from the controller's configured
                       alias suffix; the controller refuses to derive an alias when no suffix
                       is configured.
+
+                      Pangolin requires a fully qualified name and rejects a bare label, so the
+                      pattern demands at least two labels -- otherwise the resource is admitted
+                      here and then fails against Pangolin on every reconcile, forever. The
+                      wildcard and glob forms Pangolin documents (*.example.com,
+                      host-0?.example.internal) are permitted: validation stricter than the
+                      server would reject configurations that actually work.
+                    pattern: ^[a-zA-Z0-9*?_-]+(\.[a-zA-Z0-9*?_-]+)+$
                     type: string
                   disableIcmp:
                     description: DisableICMP suppresses ICMP to the destination.
@@ -183,6 +200,13 @@ spec:
             properties:
               address:
                 description: Address is the effective alias -- what mesh clients dial.
+                type: string
+              assignedAddress:
+                description: |-
+                  AssignedAddress is the mesh address Pangolin assigned to the alias. The
+                  alias is what an operator configures; this is what it resolves to, and
+                  it is reported separately rather than replacing Address so that anything
+                  already reading Address keeps seeing the same kind of value.
                 type: string
               conditions:
                 description: Conditions report Accepted, ResolvedRefs, Programmed

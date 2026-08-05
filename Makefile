@@ -59,7 +59,7 @@ generate: controller-gen ## Generate DeepCopy methods for API types.
 .PHONY: manifests
 manifests: controller-gen ## Generate CRD manifests into deploy/crds and the Helm chart.
 	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=deploy/crds
-	cp deploy/crds/pangolin.ingress.k8s.io_pangolinendpoints.yaml chart/templates/crd-pangolinendpoint.yaml
+	cp deploy/crds/pangolin.corelyr.com_pangolinendpoints.yaml chart/templates/crd-pangolinendpoint.yaml
 	$(SHELL) hack/wrap-crd-template.sh chart/templates/crd-pangolinendpoint.yaml
 
 .PHONY: test

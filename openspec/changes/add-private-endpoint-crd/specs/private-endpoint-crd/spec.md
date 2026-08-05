@@ -2,7 +2,7 @@
 
 ### Requirement: PangolinEndpoint custom resource
 
-The controller SHALL serve a namespaced custom resource `PangolinEndpoint` in group `pangolin.ingress.k8s.io`, version `v1alpha1`, with a status subresource. In `v1alpha1` the resource SHALL require a `spec.private` block and SHALL reject a `spec.public` block, which is reserved for a future public raw TCP/UDP branch.
+The controller SHALL serve a namespaced custom resource `PangolinEndpoint` in group `pangolin.corelyr.com`, version `v1alpha1`, with a status subresource. In `v1alpha1` the resource SHALL require a `spec.private` block and SHALL reject a `spec.public` block, which is reserved for a future public raw TCP/UDP branch.
 
 #### Scenario: Private endpoint is accepted
 

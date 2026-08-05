@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,11 +52,46 @@ type fakePangolin struct {
 	createUnsupported bool
 	// deleteFails makes deletion fail, standing in for an unreachable API.
 	deleteFails bool
+	// listFails makes the listing fail, standing in for the case that must
+	// never be read as "the resource does not exist".
+	listFails bool
+	// pageSize caps how many resources the listing returns per request, so a
+	// resource beyond the first page is only found by following pagination.
+	pageSize int
 
 	creates  int
 	updates  int
 	deletes  int
+	lists    int
 	roleSets int
+
+	// lastUpdateBody is the raw update payload, for asserting on which fields
+	// were sent rather than only on what the fake chose to store.
+	lastUpdateBody []byte
+}
+
+// withoutSiteID renders a resource the way a real listing does: with no siteId
+// on the resource object itself.
+func withoutSiteID(res *pangolin.SiteResource) map[string]interface{} {
+	raw, _ := json.Marshal(res)
+	var m map[string]interface{}
+	_ = json.Unmarshal(raw, &m)
+	delete(m, "siteId")
+	return m
+}
+
+// adminRoleID is the organisation admin role the live instance reported
+// attached to every private resource.
+const adminRoleID = 1
+
+// sortedIDs gives the listing a stable order.
+func sortedIDs(m map[int]*pangolin.SiteResource) []int {
+	ids := make([]int, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	return ids
 }
 
 func newFakePangolin() *fakePangolin {
@@ -105,15 +142,64 @@ func (f *fakePangolin) handler() http.Handler {
 		case len(parts) == 4 && parts[0] == "org" && parts[2] == "site" && r.Method == http.MethodGet:
 			writeData(w, map[string]interface{}{"siteId": 1, "niceId": parts[3], "name": "test site"})
 
-		// GET /org/{org}/site/{siteID}/resource/nice/{niceID}
-		case len(parts) == 7 && parts[0] == "org" && parts[4] == "resource" && parts[5] == "nice":
-			for _, res := range f.resources {
-				if res.NiceID == parts[6] {
-					writeData(w, res)
-					return
-				}
+		// GET /org/{org}/site/{siteID}/resources?limit=&offset=
+		//
+		// The listing is the only working read on a real instance, and it nests
+		// each resource under a repeated "siteResources" key alongside the
+		// network rows its join returns. The envelope is reproduced here because
+		// unwrapping it is exactly what the client has to get right.
+		case len(parts) == 5 && parts[0] == "org" && parts[2] == "site" && parts[4] == "resources" && r.Method == http.MethodGet:
+			if f.listFails {
+				http.Error(w, `{"message":"upstream exploded"}`, http.StatusInternalServerError)
+				return
 			}
-			http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
+			f.lists++
+
+			ordered := make([]*pangolin.SiteResource, 0, len(f.resources))
+			for _, id := range sortedIDs(f.resources) {
+				ordered = append(ordered, f.resources[id])
+			}
+
+			offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+			limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+			if err != nil || limit <= 0 {
+				limit = len(ordered)
+			}
+			if f.pageSize > 0 && f.pageSize < limit {
+				// A server that caps the page below what the client asked for.
+				// Without paging, a resource past the cap reads as absent.
+				limit = f.pageSize
+			}
+			if offset > len(ordered) {
+				offset = len(ordered)
+			}
+			end := offset + limit
+			if end > len(ordered) {
+				end = len(ordered)
+			}
+
+			entries := make([]map[string]interface{}, 0, end-offset)
+			for _, res := range ordered[offset:end] {
+				// A real listing carries the site association in the sibling
+				// siteNetworks row, not on the resource. Reproduced exactly:
+				// a fake that puts siteId on the resource hides an update loop.
+				entries = append(entries, map[string]interface{}{
+					"siteNetworks":  map[string]interface{}{"siteId": res.SiteID, "networkId": 3},
+					"networks":      map[string]interface{}{"networkId": 3, "scope": "resource"},
+					"siteResources": withoutSiteID(res),
+				})
+			}
+			writeData(w, map[string]interface{}{"siteResources": entries})
+
+		// GET /org/{org}/site/{siteID}/resource/nice/{niceID}
+		//
+		// Absent on a real instance: it answers with Express's HTML 404. Served
+		// here as that same routing failure so that any code reaching for it
+		// fails in tests the way it fails in production.
+		case len(parts) == 7 && parts[0] == "org" && parts[4] == "resource" && parts[5] == "nice":
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("<!DOCTYPE html>\n<html><body><pre>Cannot GET " + r.URL.Path + "</pre></body></html>\n"))
 
 		// PUT /org/{org}/site-resource
 		case len(parts) == 3 && parts[0] == "org" && parts[2] == "site-resource" && r.Method == http.MethodPut:
@@ -121,15 +207,31 @@ func (f *fakePangolin) handler() http.Handler {
 				http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
 				return
 			}
+			body, _ := io.ReadAll(r.Body)
 			var req pangolin.CreateSiteResourceRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			_ = json.Unmarshal(body, &req)
 			f.creates++
 			f.nextID++
+
+			// Pangolin substitutes "*" for a port range it is not sent. The
+			// fake reproduces that, because a fake that quietly stores "no
+			// ports" would hide the wildcard exposure this behaviour causes.
+			var raw map[string]json.RawMessage
+			_ = json.Unmarshal(body, &raw)
+			tcp, udp := req.TCPPortRange, req.UDPPortRange
+			if _, sent := raw["tcpPortRangeString"]; !sent {
+				tcp = "*"
+			}
+			if _, sent := raw["udpPortRangeString"]; !sent {
+				udp = "*"
+			}
+
 			res := &pangolin.SiteResource{
 				ID: f.nextID, NiceID: req.NiceID, Name: req.Name, Mode: req.Mode,
 				SiteID: req.SiteID, Destination: req.Destination, DestinationPort: req.DestinationPort,
-				Alias: req.Alias, TCPPortRange: req.TCPPortRange, UDPPortRange: req.UDPPortRange,
+				Alias: req.Alias, TCPPortRange: tcp, UDPPortRange: udp,
 				DisableICMP: req.DisableICMP, Enabled: true,
+				AliasAddress: fmt.Sprintf("100.96.128.%d", f.nextID%250), Status: "approved",
 			}
 			f.resources[res.ID] = res
 			f.roleIDs[res.ID] = req.RoleIDs
@@ -170,23 +272,29 @@ func (f *fakePangolin) handler() http.Handler {
 
 			switch r.Method {
 			case http.MethodGet:
-				writeData(w, res)
+				// A real instance rejects this read outright, whatever the id:
+				// its handler validates an orgId that the path has nowhere to
+				// carry. Reproduced so that a client reaching for the point
+				// read cannot pass its tests and then fail in production.
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"data":null,"success":false,"error":true,` +
+					`"message":"Validation error: Invalid input: expected string, received undefined at \"orgId\"",` +
+					`"status":400}`))
 			case http.MethodPost:
+				body, _ := io.ReadAll(r.Body)
 				var req pangolin.UpdateSiteResourceRequest
-				_ = json.NewDecoder(r.Body).Decode(&req)
+				_ = json.Unmarshal(body, &req)
 				f.updates++
+				f.lastUpdateBody = body
 				if req.Destination != nil {
 					res.Destination = *req.Destination
 				}
 				if req.Alias != nil {
 					res.Alias = *req.Alias
 				}
-				if req.TCPPortRange != nil {
-					res.TCPPortRange = *req.TCPPortRange
-				}
-				if req.UDPPortRange != nil {
-					res.UDPPortRange = *req.UDPPortRange
-				}
+				res.TCPPortRange = req.TCPPortRange
+				res.UDPPortRange = req.UDPPortRange
 				// destinationPort is nullable and always sent, so a null
 				// clears it -- mirroring the API contract the controller
 				// relies on to converge.
@@ -224,9 +332,18 @@ func (f *fakePangolin) handleSub(w http.ResponseWriter, r *http.Request, id int,
 	switch sub {
 	case "roles":
 		if r.Method == http.MethodGet {
-			out := []map[string]int{}
+			// Pangolin attaches the organisation's admin role to every private
+			// resource and never lets it go. Modelled here because a fake that
+			// grants nothing cannot show the write-per-reconcile loop that
+			// behaviour produces on a real instance.
+			out := []map[string]interface{}{
+				{"roleId": adminRoleID, "name": "Admin", "isAdmin": true},
+			}
 			for _, v := range f.roleIDs[id] {
-				out = append(out, map[string]int{"roleId": v})
+				if v == adminRoleID {
+					continue
+				}
+				out = append(out, map[string]interface{}{"roleId": v, "name": "role", "isAdmin": false})
 			}
 			writeData(w, map[string]interface{}{"roles": out})
 			return
@@ -236,7 +353,14 @@ func (f *fakePangolin) handleSub(w http.ResponseWriter, r *http.Request, id int,
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.roleSets++
-		f.roleIDs[id] = body.RoleIDs
+		// The admin grant survives any write that omits it.
+		kept := make([]int, 0, len(body.RoleIDs))
+		for _, v := range body.RoleIDs {
+			if v != adminRoleID {
+				kept = append(kept, v)
+			}
+		}
+		f.roleIDs[id] = kept
 		writeData(w, map[string]interface{}{})
 	case "users":
 		if r.Method == http.MethodGet {
@@ -282,6 +406,7 @@ type testEnv struct {
 	k8s        client.Client
 	pangolin   *fakePangolin
 	server     *httptest.Server
+	client     *pangolin.Client
 }
 
 func endpointScheme(t *testing.T) *runtime.Scheme {
@@ -323,7 +448,7 @@ func newTestEnv(t *testing.T, objs ...client.Object) *testEnv {
 		principals:               newPrincipalResolver(pc, time.Minute),
 	}
 
-	return &testEnv{t: t, reconciler: r, k8s: k8s, pangolin: fp, server: srv}
+	return &testEnv{t: t, reconciler: r, k8s: k8s, pangolin: fp, server: srv, client: pc}
 }
 
 func (e *testEnv) reconcile(ep *v1alpha1.PangolinEndpoint) (ctrl.Result, error) {
@@ -878,4 +1003,435 @@ func asIssue(err error, target **endpointIssue) bool {
 		*target = issue
 	}
 	return ok
+}
+
+// ---------------------------------------------------------------------------
+// Live-defect regressions.
+//
+// Each of these covers a failure that the previous suite passed cleanly: the
+// fixtures modelled an API the server does not serve, so the tests agreed with
+// the client instead of with Pangolin.
+
+// The defect that motivated the change: the client could create a resource it
+// was then unable to read, so every reconcile after the first failed and the
+// endpoint never converged.
+func TestEndpoint_CreatedResourceIsReadableBySameClient(t *testing.T) {
+	ep := testEndpoint()
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+	id := env.get(ep).Status.SiteResourceID
+	if id == "" {
+		t.Fatal("nothing was created")
+	}
+
+	// The read the second reconcile depends on, exercised directly.
+	got, err := env.client.GetSiteResource(context.Background(), "1", id)
+	if err != nil {
+		t.Fatalf("a resource this client created must be readable by it: %v", err)
+	}
+	if strconv.Itoa(got.ID) != id {
+		t.Fatalf("read back id %d want %s", got.ID, id)
+	}
+
+	// And the same again through a full reconcile, which must stay clean.
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatalf("second reconcile must converge, got %v", err)
+	}
+	after := env.get(ep)
+	assertCondition(t, after, v1alpha1.ConditionProgrammed, metav1.ConditionTrue, "")
+}
+
+// A TCP-only endpoint must not leave UDP to the server, which fills an absent
+// range with "*" -- every UDP port, open to everyone granted access.
+func TestEndpoint_UndeclaredProtocolIsNotLeftWildcard(t *testing.T) {
+	ep := testEndpoint()
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+
+	res := env.pangolin.only()
+	if res.TCPPortRange != "5432" {
+		t.Fatalf("tcp = %q want 5432", res.TCPPortRange)
+	}
+	if res.UDPPortRange == "*" {
+		t.Fatal("udp range is \"*\": an endpoint declaring only TCP exposed every UDP port")
+	}
+	if res.UDPPortRange != "" {
+		t.Fatalf("udp = %q want empty", res.UDPPortRange)
+	}
+}
+
+// An explicit wildcard is a different thing from an absent one and must survive.
+func TestEndpoint_ExplicitAllPortsStillSerializesToWildcard(t *testing.T) {
+	all := true
+	ep := testEndpoint(func(ep *v1alpha1.PangolinEndpoint) {
+		ep.Spec.Private.Ports = []v1alpha1.EndpointPort{{Protocol: v1alpha1.ProtocolUDP, All: &all}}
+	})
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+
+	res := env.pangolin.only()
+	if res.UDPPortRange != "*" {
+		t.Fatalf("udp = %q want *", res.UDPPortRange)
+	}
+}
+
+// Wildcard drift left by an earlier release must be detected and narrowed, then
+// settle -- narrowing that never converges is the update loop in another guise.
+func TestEndpoint_WildcardDriftIsNarrowedThenSettles(t *testing.T) {
+	ep := testEndpoint()
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+
+	// Put the resource back into the state the previous release created.
+	env.pangolin.only().UDPPortRange = "*"
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+	_, updates, _ := env.pangolin.counts()
+	if updates != 1 {
+		t.Fatalf("updates = %d want 1: the wildcard must be detected as a difference", updates)
+	}
+	if got := env.pangolin.only().UDPPortRange; got != "" {
+		t.Fatalf("udp = %q want empty after narrowing", got)
+	}
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+	if _, updates, _ = env.pangolin.counts(); updates != 1 {
+		t.Fatalf("updates = %d want 1: narrowing must settle, not repeat", updates)
+	}
+}
+
+// Both range fields must appear on the wire even when empty; omitting one is
+// what hands the server its wildcard default.
+func TestEndpoint_UpdateSendsBothPortRanges(t *testing.T) {
+	ep := testEndpoint()
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+	env.pangolin.only().Alias = "stale.example.internal" // force an update
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+
+	env.pangolin.mu.Lock()
+	body := string(env.pangolin.lastUpdateBody)
+	env.pangolin.mu.Unlock()
+	if body == "" {
+		t.Fatal("no update was issued")
+	}
+	for _, field := range []string{`"tcpPortRangeString"`, `"udpPortRangeString"`} {
+		if !strings.Contains(body, field) {
+			t.Fatalf("update body omits %s: %s", field, body)
+		}
+	}
+}
+
+// A listing that fails must never be read as "the resource is not there".
+func TestEndpoint_FailedLookupDoesNotCreateDuplicate(t *testing.T) {
+	ep := testEndpoint()
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+
+	current := env.get(ep)
+	current.Status.SiteResourceID = ""
+	if err := env.k8s.Status().Update(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+
+	env.pangolin.mu.Lock()
+	env.pangolin.listFails = true
+	env.pangolin.mu.Unlock()
+
+	if _, err := env.reconcile(ep); err == nil {
+		t.Fatal("a failed lookup must surface as an error, not as absence")
+	}
+
+	creates, _, _ := env.pangolin.counts()
+	if creates != 1 {
+		t.Fatalf("creates = %d want 1: a failed lookup must not create a duplicate", creates)
+	}
+}
+
+// Recovery must follow pagination: a resource past the first page is still the
+// same resource, and concluding otherwise creates a second one.
+func TestEndpoint_RecoveryFollowsPagination(t *testing.T) {
+	ep := testEndpoint()
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+	originalID := env.pangolin.only().ID
+
+	env.pangolin.mu.Lock()
+	// Resources ahead of ours in the listing, and a page too small to reach it.
+	for i := 0; i < 3; i++ {
+		env.pangolin.nextID++
+		id := env.pangolin.nextID
+		env.pangolin.resources[id] = &pangolin.SiteResource{
+			ID: id, NiceID: fmt.Sprintf("unrelated-%d", i), SiteID: 1,
+		}
+	}
+	env.pangolin.pageSize = 2
+	env.pangolin.mu.Unlock()
+
+	current := env.get(ep)
+	current.Status.SiteResourceID = ""
+	if err := env.k8s.Status().Update(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+
+	creates, _, _ := env.pangolin.counts()
+	if creates != 1 {
+		t.Fatalf("creates = %d want 1: pagination was not followed, so recovery missed the resource", creates)
+	}
+	if got := env.get(ep).Status.SiteResourceID; got != strconv.Itoa(originalID) {
+		t.Fatalf("status.siteResourceId = %q want %d", got, originalID)
+	}
+}
+
+// The address a client dials is reported, not just the alias an operator wrote.
+func TestEndpoint_AssignedAddressIsReported(t *testing.T) {
+	ep := testEndpoint()
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+
+	got := env.get(ep)
+	if got.Status.Address != "postgres.data.corp.internal" {
+		t.Fatalf("status.address = %q want the alias", got.Status.Address)
+	}
+	if got.Status.AssignedAddress != env.pangolin.only().AliasAddress {
+		t.Fatalf("status.assignedAddress = %q want %q",
+			got.Status.AssignedAddress, env.pangolin.only().AliasAddress)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The implicit admin grant.
+//
+// Pangolin attaches its organisation admin role to every private resource and
+// keeps it through any attempt to remove it. Treating that as a difference the
+// controller owns produced a write on every reconcile, forever.
+
+func TestEndpoint_ServerGrantedRoleCausesNoWrite(t *testing.T) {
+	ep := testEndpoint(func(ep *v1alpha1.PangolinEndpoint) {
+		ep.Spec.Private.Access = nil // names no principals at all
+	})
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	for i := 0; i < 4; i++ {
+		if _, err := env.reconcile(ep); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+	}
+
+	env.pangolin.mu.Lock()
+	sets := env.pangolin.roleSets
+	env.pangolin.mu.Unlock()
+	if sets != 0 {
+		t.Fatalf("role writes = %d want 0: the implicit admin grant is being written back every reconcile", sets)
+	}
+}
+
+func TestEndpoint_ServerGrantedRoleIsNotWithdrawn(t *testing.T) {
+	ep := testEndpoint() // names role "developers" (id 3)
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+
+	res := env.pangolin.only()
+	roles, err := env.client.ListSiteResourceRoles(context.Background(), strconv.Itoa(res.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var haveAdmin, haveNamed bool
+	for _, role := range roles {
+		if role.IsAdmin {
+			haveAdmin = true
+		}
+		if role.ID == 3 {
+			haveNamed = true
+		}
+	}
+	if !haveNamed {
+		t.Fatal("the named role was not granted")
+	}
+	if !haveAdmin {
+		t.Fatal("the implicit admin grant was withdrawn; it is the server's to hold")
+	}
+}
+
+func TestEndpoint_ManagedRolesStillConverge(t *testing.T) {
+	ep := testEndpoint()
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+	env.pangolin.mu.Lock()
+	afterCreate := env.pangolin.roleSets
+	env.pangolin.mu.Unlock()
+
+	// Drop the named role from the spec.
+	current := env.get(ep)
+	current.Spec.Private.Access.Roles = nil
+	current.Generation++
+	if err := env.k8s.Update(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+	env.pangolin.mu.Lock()
+	afterRemoval := env.pangolin.roleSets
+	env.pangolin.mu.Unlock()
+	if afterRemoval != afterCreate+1 {
+		t.Fatalf("role writes = %d want %d: removing a named role must issue exactly one write",
+			afterRemoval, afterCreate+1)
+	}
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+	env.pangolin.mu.Lock()
+	settled := env.pangolin.roleSets
+	env.pangolin.mu.Unlock()
+	if settled != afterRemoval {
+		t.Fatalf("role writes = %d want %d: removal must settle, not repeat", settled, afterRemoval)
+	}
+}
+
+func TestEndpoint_NoPrincipalsMessageMentionsImplicitGrant(t *testing.T) {
+	ep := testEndpoint(func(ep *v1alpha1.PangolinEndpoint) {
+		ep.Spec.Private.Access = nil
+	})
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+
+	cond := conditionOf(t, env.get(ep), v1alpha1.ConditionReady)
+	if cond == nil || cond.Reason != v1alpha1.ReasonNoPrincipalsGranted {
+		t.Fatalf("condition = %+v", cond)
+	}
+	if !strings.Contains(cond.Message, "administrator") {
+		t.Fatalf("message must say who can still reach the endpoint, got %q", cond.Message)
+	}
+}
+
+// Pangolin does not enforce niceId uniqueness, so recovery can find two
+// candidates. Choosing one would reprogram a resource the controller may not
+// own -- the failure the identity model exists to prevent.
+func TestEndpoint_AmbiguousIdentityIsRefused(t *testing.T) {
+	ep := testEndpoint()
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+	original := env.pangolin.only()
+	originalPorts := original.TCPPortRange
+
+	// Plant a second resource carrying the same niceId, as another cluster
+	// sharing this organization under the same prefix would.
+	env.pangolin.mu.Lock()
+	env.pangolin.nextID++
+	planted := &pangolin.SiteResource{
+		ID: env.pangolin.nextID, NiceID: original.NiceID, SiteID: 1,
+		Alias: "someone-else.corp.internal", TCPPortRange: "1234",
+	}
+	env.pangolin.resources[planted.ID] = planted
+	env.pangolin.mu.Unlock()
+
+	// Lose the recorded identifier, forcing recovery by niceId.
+	current := env.get(ep)
+	current.Status.SiteResourceID = ""
+	if err := env.k8s.Status().Update(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := env.reconcile(ep)
+	if err != nil {
+		t.Fatalf("an ambiguous identity is operator-fixable and must not be a reconcile error, got %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Fatal("expected a requeue")
+	}
+
+	got := env.get(ep)
+	assertCondition(t, got, v1alpha1.ConditionProgrammed, metav1.ConditionFalse, v1alpha1.ReasonIdentityAmbiguous)
+
+	creates, updates, _ := env.pangolin.counts()
+	if creates != 1 {
+		t.Fatalf("creates = %d want 1: a third resource was created on top of the collision", creates)
+	}
+	if updates != 0 {
+		t.Fatalf("updates = %d want 0: a candidate was reprogrammed despite the ambiguity", updates)
+	}
+	if planted.TCPPortRange != "1234" || original.TCPPortRange != originalPorts {
+		t.Fatal("a candidate was modified while its ownership was undetermined")
+	}
+}
+
+// An endpoint that already knows which resource is its own has no identity
+// question to answer, so a collision elsewhere must not disturb it.
+func TestEndpoint_RecordedIdentifierSurvivesACollision(t *testing.T) {
+	ep := testEndpoint()
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+	original := env.pangolin.only()
+
+	env.pangolin.mu.Lock()
+	env.pangolin.nextID++
+	planted := &pangolin.SiteResource{
+		ID: env.pangolin.nextID, NiceID: original.NiceID, SiteID: 1,
+		Alias: "someone-else.corp.internal",
+	}
+	env.pangolin.resources[planted.ID] = planted
+	env.pangolin.mu.Unlock()
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatalf("a collision elsewhere must not disturb a known identity, got %v", err)
+	}
+
+	got := env.get(ep)
+	assertCondition(t, got, v1alpha1.ConditionProgrammed, metav1.ConditionTrue, "")
+	if got.Status.SiteResourceID != strconv.Itoa(original.ID) {
+		t.Fatalf("status.siteResourceId = %q want %d", got.Status.SiteResourceID, original.ID)
+	}
 }

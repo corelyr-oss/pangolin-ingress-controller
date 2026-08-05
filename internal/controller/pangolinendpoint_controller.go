@@ -102,9 +102,9 @@ type PangolinEndpointReconciler struct {
 	sites  map[string]*pangolin.Site
 }
 
-//+kubebuilder:rbac:groups=pangolin.ingress.k8s.io,resources=pangolinendpoints,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=pangolin.ingress.k8s.io,resources=pangolinendpoints/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=pangolin.ingress.k8s.io,resources=pangolinendpoints/finalizers,verbs=update
+//+kubebuilder:rbac:groups=pangolin.corelyr.com,resources=pangolinendpoints,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=pangolin.corelyr.com,resources=pangolinendpoints/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=pangolin.corelyr.com,resources=pangolinendpoints/finalizers,verbs=update
 //+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -256,10 +256,12 @@ func (r *PangolinEndpointReconciler) reconcileEndpoint(ctx context.Context, ep *
 			return err
 		}
 		ep.Status.SiteResourceID = strconv.Itoa(created.ID)
+		ep.Status.AssignedAddress = created.AliasAddress
 		return nil
 	}
 
 	ep.Status.SiteResourceID = strconv.Itoa(existing.ID)
+	ep.Status.AssignedAddress = existing.AliasAddress
 	if err := r.updateSiteResourceIfChanged(ctx, existing, desired); err != nil {
 		return err
 	}
@@ -346,16 +348,14 @@ func (r *PangolinEndpointReconciler) updateSiteResourceIfChanged(ctx context.Con
 
 	destination := d.destination
 	alias := d.alias
-	tcp := d.tcp.String()
-	udp := d.udp.String()
 	req := &pangolin.UpdateSiteResourceRequest{
 		Name:         d.name,
 		Mode:         privateResourceMode,
 		SiteID:       d.siteIDs[0],
 		Destination:  &destination,
 		Alias:        &alias,
-		TCPPortRange: &tcp,
-		UDPPortRange: &udp,
+		TCPPortRange: d.tcp.String(),
+		UDPPortRange: d.udp.String(),
 		DisableICMP:  &d.disableICMP,
 		Enabled:      &d.enabled,
 	}
@@ -381,15 +381,71 @@ func (r *PangolinEndpointReconciler) updateSiteResourceIfChanged(ctx context.Con
 // reconcilePrincipals converges role, user and client assignments through the
 // dedicated sub-endpoints, which is the only way to observe what is currently
 // assigned. Each is read first and written only on a difference.
+// serverOwnedRoleIDs collects the roles Pangolin grants on its own.
+//
+// Pangolin attaches the organisation's admin role to every private resource
+// and keeps it attached through any attempt to remove it. Comparing it against
+// a spec that never asked for it reports a difference the controller cannot
+// resolve: it writes the role set without the admin role, Pangolin retains it,
+// and the next reconcile writes again -- a write per reconcile, forever.
+//
+// The role is recognised by the server's own IsAdmin flag rather than by name
+// or identifier: a name match breaks the moment the role is renamed, and a
+// fixed identifier assumes an ordering the API does not promise. Either would
+// resume the loop silently.
+func serverOwnedRoleIDs(roles []pangolin.Role) map[int]struct{} {
+	owned := make(map[int]struct{})
+	for _, role := range roles {
+		if role.IsAdmin {
+			owned[role.ID] = struct{}{}
+		}
+	}
+	return owned
+}
+
+// managedRoleIDs is the part of a role set the controller is responsible for.
+//
+// Both sides of the comparison are filtered, not just the observed one. An
+// operator is free to name the admin role explicitly, and if only the observed
+// side were filtered that spec would read as a permanent difference -- the same
+// loop, reached from the other direction.
+func managedRoleIDs(ids []int, serverOwned map[int]struct{}) []int {
+	managed := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if _, owned := serverOwned[id]; owned {
+			continue
+		}
+		managed = append(managed, id)
+	}
+	return managed
+}
+
+func roleIDsOf(roles []pangolin.Role) []int {
+	ids := make([]int, 0, len(roles))
+	for _, role := range roles {
+		ids = append(ids, role.ID)
+	}
+	return ids
+}
+
 func (r *PangolinEndpointReconciler) reconcilePrincipals(ctx context.Context, siteResourceID string, roleIDs []int, userIDs []string, clientIDs []int) error {
 	currentRoles, err := r.PangolinClient.ListSiteResourceRoles(ctx, siteResourceID)
 	if err != nil {
 		if !pangolin.IsNotImplemented(err) {
 			return fmt.Errorf("failed to list private resource roles: %w", err)
 		}
-	} else if !intSetsEqual(currentRoles, roleIDs) {
-		if err := r.PangolinClient.SetSiteResourceRoles(ctx, siteResourceID, roleIDs); err != nil && !pangolin.IsNotImplemented(err) {
-			return fmt.Errorf("failed to set private resource roles: %w", err)
+	} else {
+		serverOwned := serverOwnedRoleIDs(currentRoles)
+		current := managedRoleIDs(roleIDsOf(currentRoles), serverOwned)
+		desired := managedRoleIDs(roleIDs, serverOwned)
+
+		if !intSetsEqual(current, desired) {
+			// Only the managed roles are written. A server-owned role is left
+			// out rather than withdrawn: Pangolin would keep it regardless, and
+			// asking is what turned a no-op into a write on every reconcile.
+			if err := r.PangolinClient.SetSiteResourceRoles(ctx, siteResourceID, desired); err != nil && !pangolin.IsNotImplemented(err) {
+				return fmt.Errorf("failed to set private resource roles: %w", err)
+			}
 		}
 	}
 
@@ -424,9 +480,16 @@ func (r *PangolinEndpointReconciler) reconcilePrincipals(ctx context.Context, si
 // There is no match-on-attributes fallback. The nice ID is a pure function of
 // the object's namespace and name, so identity never has to be guessed -- and
 // a resource that merely looks similar is never claimed.
+//
+// Both lookups read the site listing, and only a complete listing that holds no
+// match reports absence. Any other failure is returned as an error, so the
+// caller cannot mistake "the lookup did not work" for "there is nothing there"
+// and create a second resource alongside the first.
 func (r *PangolinEndpointReconciler) findSiteResource(ctx context.Context, ep *v1alpha1.PangolinEndpoint, siteID int) (*pangolin.SiteResource, error) {
+	site := strconv.Itoa(siteID)
+
 	if id := ep.Status.SiteResourceID; id != "" {
-		existing, err := r.PangolinClient.GetSiteResource(ctx, id)
+		existing, err := r.PangolinClient.GetSiteResource(ctx, site, id)
 		if err == nil {
 			return existing, nil
 		}
@@ -436,12 +499,20 @@ func (r *PangolinEndpointReconciler) findSiteResource(ctx context.Context, ep *v
 		// Deleted out from under us; fall through to the identity lookup.
 	}
 
-	existing, err := r.PangolinClient.GetSiteResourceByNiceID(ctx, strconv.Itoa(siteID), ep.Status.NiceID)
+	existing, err := r.PangolinClient.GetSiteResourceByNiceID(ctx, site, ep.Status.NiceID)
 	if err == nil {
 		return existing, nil
 	}
 	if pangolin.IsNotFound(err) {
 		return nil, nil
+	}
+	if pangolin.IsAmbiguous(err) {
+		// Pangolin does not enforce niceId uniqueness, so more than one match
+		// is possible and none of them is identifiably this endpoint's. Picking
+		// one would reprogram a resource the controller may not own; an
+		// operator has to resolve the collision.
+		return nil, issuef(v1alpha1.ConditionProgrammed, v1alpha1.ReasonIdentityAmbiguous,
+			"cannot identify this endpoint's private resource: %v", err)
 	}
 	return nil, fmt.Errorf("failed to look up Pangolin private resource by nice ID %q: %w", ep.Status.NiceID, err)
 }
@@ -686,8 +757,12 @@ func (r *PangolinEndpointReconciler) updateStatus(ctx context.Context, ep *v1alp
 		setCondition(ep, v1alpha1.ConditionProgrammed, metav1.ConditionTrue, v1alpha1.ReasonReconciled, "Pangolin private resource is up to date")
 
 		if grantsNoPrincipals(ep) {
+			// Pangolin attaches the organisation's admin role to every private
+			// resource, so "no access" would be untrue. What is missing is
+			// access for the principals an operator would name.
 			setCondition(ep, v1alpha1.ConditionReady, metav1.ConditionFalse, v1alpha1.ReasonNoPrincipalsGranted,
-				"endpoint exists but grants access to no client, role or user")
+				"endpoint names no client, role or user; only organisation administrators can reach it "+
+					"through the role Pangolin grants implicitly")
 		} else {
 			setCondition(ep, v1alpha1.ConditionReady, metav1.ConditionTrue, v1alpha1.ReasonReconciled, "endpoint is reachable by its principals")
 		}

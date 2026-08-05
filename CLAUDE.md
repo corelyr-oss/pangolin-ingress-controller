@@ -59,7 +59,15 @@ All controller-recognized annotations are constants at the top of `internal/cont
 
 ### PangolinEndpoint CRD (`api/v1alpha1/`, `internal/controller/pangolinendpoint_controller.go`)
 
-The repo's only CRD. `PangolinEndpoint` covers Pangolin **private resources**
+The repo's only CRD, in group **`pangolin.corelyr.com`** — deliberately *not*
+`pangolin.ingress.k8s.io` (the Ingress annotation prefix). The apiserver treats
+any group under `k8s.io`/`kubernetes.io` as a protected community group and
+rejects a CRD in one outright unless it carries an `api-approved.kubernetes.io`
+annotation naming a Kubernetes API review. The annotation prefix on the
+`Ingress` path is unaffected — that rule applies to API groups, not annotation
+keys — so the two intentionally differ.
+
+`PangolinEndpoint` covers Pangolin **private resources**
 (mesh-only endpoints, called *site resources* in the older API surface), which
 cannot be modelled as an `Ingress`: no public hostname, no TLS, no HTTP
 semantics, and mandatory access control. It is a second, independent reconciler

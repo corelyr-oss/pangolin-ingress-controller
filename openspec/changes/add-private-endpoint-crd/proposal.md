@@ -8,7 +8,7 @@ Today, teams running everything as IaC have to create private endpoints by hand 
 
 ## What Changes
 
-- Introduce the repository's **first CRD**: `PangolinEndpoint` (`pangolin.ingress.k8s.io/v1alpha1`, namespaced), for Pangolin resources that cannot be modelled as an `Ingress`.
+- Introduce the repository's **first CRD**: `PangolinEndpoint` (`pangolin.corelyr.com/v1alpha1`, namespaced), for Pangolin resources that cannot be modelled as an `Ingress`.
 - Ship a second reconciler (`PangolinEndpointReconciler`) alongside `IngressReconciler`. The `Ingress` path is unchanged.
 - `v1alpha1` implements the **private** branch only. A `spec.private` block declares an internal endpoint backed by a Kubernetes `Service`:
   - destination resolved from `backendRef` to the Service's cluster DNS name

@@ -49,7 +49,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - pangolin.ingress.k8s.io
+  - pangolin.corelyr.com
   resources:
   - pangolinendpoints
   verbs:
@@ -61,7 +61,7 @@ rules:
   - patch
   - delete
 - apiGroups:
-  - pangolin.ingress.k8s.io
+  - pangolin.corelyr.com
   resources:
   - pangolinendpoints/status
   verbs:
@@ -69,7 +69,7 @@ rules:
   - update
   - patch
 - apiGroups:
-  - pangolin.ingress.k8s.io
+  - pangolin.corelyr.com
   resources:
   - pangolinendpoints/finalizers
   verbs:

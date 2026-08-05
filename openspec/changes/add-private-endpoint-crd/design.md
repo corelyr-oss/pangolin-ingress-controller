@@ -48,7 +48,7 @@ The deployment target is a **self-hosted Pangolin instance**, not Pangolin Cloud
 ### D1: One kind with nested exclusive blocks (`PangolinEndpoint`)
 
 ```yaml
-apiVersion: pangolin.ingress.k8s.io/v1alpha1
+apiVersion: pangolin.corelyr.com/v1alpha1
 kind: PangolinEndpoint
 metadata: {name: postgres, namespace: data}
 spec:
@@ -94,11 +94,36 @@ Private-resource create accepts a caller-supplied `niceId`. The controller sets:
   niceId = <resource-prefix>-<namespace>-<name>      e.g. pangolin-controller-data-postgres
 ```
 
-and recovers a lost `.status.siteResourceId` via `GET /org/{orgID}/site/{siteID}/resource/nice/{niceId}`. This makes identity a pure function of the CR's coordinates. There is no list-and-match adoption path and therefore no risk of claiming an object the controller does not own — a materially better position than the `Ingress` path's adopt-on-409, and the reason `v1alpha1` is private-only (public create accepts no `niceId`).
+and recovers a lost `.status.siteResourceId` by its `niceId`. This makes identity a pure function of the CR's coordinates. There is no adoption-by-attributes path and therefore no risk of claiming an object the controller does not own — a materially better position than the `Ingress` path's adopt-on-409, and the reason `v1alpha1` is private-only (public create accepts no `niceId`).
+
+> **Corrected 2026-08-06 (spike tasks 1.2 and 1.7).** Two claims above did not
+> survive contact with the server. First, the `GET .../resource/nice/{niceId}`
+> route **does not exist**; recovery lists the site's resources and matches the
+> `niceId` itself (see `fix-private-endpoint-live-defects`). Second, and more
+> importantly, **Pangolin does not enforce `niceId` uniqueness** -- a duplicate
+> is accepted with `201`, leaving two resources sharing one identity, while a
+> duplicate *alias* is refused with `409`. So "identity is never guessed" holds
+> only as far as the controller's own derivation goes: the server will not stop
+> a collision, and the current recovery takes the first match in listing order.
+> A collision cannot arise from two `PangolinEndpoint`s in one cluster, since
+> the derivation is injective over (namespace, name), but it can arise from two
+> clusters sharing an organization with the same `--resource-prefix`, or from a
+> hand-made resource. Refusing on an ambiguous match, rather than picking one,
+> is the open correction.
 
 `niceId` must match `^[a-zA-Z0-9-]+$` and is capped at 255 characters. Namespaces are DNS-1123 *labels* and always fit, but object names are DNS-1123 *subdomains* and may contain dots — `db.primary` is a legal name that has no `niceId` expression. Both violations are refused (`Accepted=False`, reason `IdentityInvalid` or `IdentityTooLong`) rather than truncated or character-substituted: rewriting `db.primary` to `db-primary` would collide with an endpoint genuinely named `db-primary`, and two CRs sharing one identity would fight over a single Pangolin resource.
 
 ### D5: Structured ports, string serialization, semantic comparison
+
+> **Corrected 2026-08-06 (spike task 1.5).** Pangolin normalises port range
+> strings **not at all**: `"5433,5432"`, `"80,80"`, `"100-200,150-250"` and
+> `"8080-8080"` were each stored and read back byte-for-byte. The premise below
+> -- that the server reorders, merges or deduplicates -- is wrong. The semantic
+> comparison stays, because what it actually protects against is the reverse
+> direction: the controller's canonical serialization differing from an
+> equivalent string already stored (a hand edit, or an older controller's
+> output). Comparing text there would rewrite the resource on every reconcile.
+
 
 ```
   spec.private.ports[]                          tcpPortRangeString / udpPortRangeString
@@ -213,6 +238,21 @@ output.
 - **[Trade-off] Two reconcilers, no shared core.** The private branch shares almost nothing with the HTTP path beyond the API client, so extracting a shared core now would be speculative. It becomes worth doing when the public raw branch lands, since *that* branch reuses targets, health checks, and stale-target cleanup.
 
 ## Open Questions
+
+> **Retrospective (2026-08-06).** The spike below was not run before
+> implementation, and the route and payload assumptions in this document were
+> taken from Pangolin's OpenAPI document instead. That document is not a
+> reliable description of the running server: it advertises two point reads
+> that reject every request, and a `niceId` lookup route that does not exist.
+> Building on it produced a controller that could not read a resource it had
+> just created, an identity lookup that would have created duplicates, and a
+> create that left every UDP port open. See
+> `fix-private-endpoint-live-defects` for the captured reality and the fixes.
+>
+> **Do not re-derive this API surface from the OpenAPI document.** Capture it
+> from a live instance; the method that worked was pointing
+> `--pangolin-base-url` at a local logging proxy and reading the controller's
+> own traffic.
 
 Resolved by the spike in tasks section 1, before any implementation:
 

@@ -127,6 +127,29 @@ func IsNotFound(err error) bool {
 	return ok
 }
 
+// AmbiguousError reports that a lookup by identity matched more than one
+// object.
+//
+// Pangolin enforces uniqueness on a private resource's alias -- a duplicate is
+// refused with 409 -- but not on its niceId, where a duplicate is accepted.
+// Nothing server-side therefore prevents two resources sharing the identity the
+// controller recovers by, and returning either one would mean reprogramming a
+// resource the controller may not own. The ambiguity is reported instead, so
+// the caller can refuse rather than choose.
+type AmbiguousError struct {
+	Message string
+}
+
+func (e *AmbiguousError) Error() string {
+	return e.Message
+}
+
+// IsAmbiguous returns true if a lookup matched more than one object.
+func IsAmbiguous(err error) bool {
+	_, ok := err.(*AmbiguousError)
+	return ok
+}
+
 // checkResponseWithNotFound behaves like checkResponse but maps 404 to
 // *NotFoundError. Use it on lookups where an absent object is an expected,
 // non-exceptional outcome.
