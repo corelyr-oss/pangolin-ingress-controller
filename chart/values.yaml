@@ -50,8 +50,35 @@ controller:
   # Set to 0 to disable refreshing, in which case a controller restart is
   # required to pick up newly registered domains.
   domainCacheRefreshInterval: 60s
+  # How often at most the Pangolin role and client lists may be refetched after
+  # a principal named on a PangolinEndpoint fails to resolve. Bounds how long a
+  # role or client created after controller startup stays unresolvable.
+  nameCacheRefreshInterval: 60s
+  # DNS suffix used to derive a PangolinEndpoint's internal alias as
+  # <name>.<namespace>.<suffix>, e.g. "corp.internal" -> postgres.data.corp.internal.
+  #
+  # Intentionally empty by default: aliases are unique across a Pangolin
+  # organization, so a shipped default would make two clusters sharing one org
+  # collide on the same alias. PangolinEndpoints that do not set
+  # spec.private.alias themselves are not programmed until this is set.
+  #
+  # Changing this rewrites the alias of every endpoint that derives one, which
+  # changes the address clients dial.
+  privateAliasSuffix: ""
+  # Cluster DNS suffix used to address backing Services.
+  clusterDomain: svc.cluster.local
   # Log level: info, debug, error (or integer: 0=info, 1=debug, 2=trace)
   logLevel: info
+
+# CustomResourceDefinition management
+crds:
+  # Install the PangolinEndpoint CRD with the chart.
+  #
+  # The CRD is rendered from templates/ rather than the chart's crds/
+  # directory, because Helm never upgrades a CRD that already exists when it is
+  # shipped in crds/ -- which would strand users on whichever v1alpha1 schema
+  # they first installed. Set to false if CRDs are managed out of band.
+  install: true
 
 # IngressClass configuration
 ingressClass:

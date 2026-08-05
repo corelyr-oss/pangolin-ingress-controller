@@ -102,6 +102,42 @@ func IsNotImplemented(err error) bool {
 	return ok
 }
 
+// NotFoundError is returned when a specific object does not exist (HTTP 404 on
+// a route that is known to be implemented).
+//
+// This deliberately overlaps with NotImplementedError: Pangolin answers both
+// "this route does not exist on this build" and "this object does not exist"
+// with a 404, and nothing in the response distinguishes them. Callers pick the
+// interpretation that fits the call site -- a lookup-by-identity treats 404 as
+// "absent", while a create or list treats it as "unsupported by this server".
+// The reconcile ordering makes that safe: a lookup miss leads to a create, and
+// the create is what reports an unsupported server.
+type NotFoundError struct {
+	Message string
+}
+
+func (e *NotFoundError) Error() string {
+	return e.Message
+}
+
+// IsNotFound returns true if the error is a 404 from a route treated as
+// implemented.
+func IsNotFound(err error) bool {
+	_, ok := err.(*NotFoundError)
+	return ok
+}
+
+// checkResponseWithNotFound behaves like checkResponse but maps 404 to
+// *NotFoundError. Use it on lookups where an absent object is an expected,
+// non-exceptional outcome.
+func checkResponseWithNotFound(resp *http.Response) error {
+	if resp.StatusCode == http.StatusNotFound {
+		body, _ := io.ReadAll(resp.Body)
+		return &NotFoundError{Message: fmt.Sprintf("API request failed with status %d: %s", resp.StatusCode, string(body))}
+	}
+	return checkResponse(resp)
+}
+
 // checkResponse checks the HTTP response for errors
 func checkResponse(resp *http.Response) error {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {

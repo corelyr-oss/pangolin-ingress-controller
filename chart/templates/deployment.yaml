@@ -46,6 +46,11 @@ spec:
         - --pangolin-site-nice-id={{ .Values.pangolin.siteNiceId }}
         - --resource-prefix={{ .Values.controller.resourcePrefix }}
         - --domain-cache-refresh-interval={{ .Values.controller.domainCacheRefreshInterval }}
+        - --name-cache-refresh-interval={{ .Values.controller.nameCacheRefreshInterval }}
+        {{- if .Values.controller.privateAliasSuffix }}
+        - --private-alias-suffix={{ .Values.controller.privateAliasSuffix }}
+        {{- end }}
+        - --cluster-domain={{ .Values.controller.clusterDomain }}
         - --zap-log-level={{ .Values.controller.logLevel }}
         env:
         - name: PANGOLIN_BASE_URL

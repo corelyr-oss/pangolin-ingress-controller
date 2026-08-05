@@ -46,6 +46,32 @@ rules:
   - list
   - watch
 - apiGroups:
+  - pangolin.ingress.k8s.io
+  resources:
+  - pangolinendpoints
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - pangolin.ingress.k8s.io
+  resources:
+  - pangolinendpoints/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - pangolin.ingress.k8s.io
+  resources:
+  - pangolinendpoints/finalizers
+  verbs:
+  - update
+- apiGroups:
   - ""
   resources:
   - events

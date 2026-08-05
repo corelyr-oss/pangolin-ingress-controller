@@ -1,0 +1,280 @@
+{{- if .Values.crds.install }}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+  name: pangolinendpoints.pangolin.ingress.k8s.io
+spec:
+  group: pangolin.ingress.k8s.io
+  names:
+    kind: PangolinEndpoint
+    listKind: PangolinEndpointList
+    plural: pangolinendpoints
+    shortNames:
+    - pgep
+    singular: pangolinendpoint
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.address
+      name: Address
+      type: string
+    - jsonPath: .status.resolvedPorts.tcp
+      name: Ports
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PangolinEndpoint is a Pangolin resource that cannot be expressed as an
+          Ingress: it has no public hostname, no TLS to terminate and no HTTP
+          semantics, and its access control is mandatory rather than optional.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: PangolinEndpointSpec defines the desired state of a PangolinEndpoint.
+            properties:
+              backendRef:
+                description: BackendRef selects the Service that backs this endpoint.
+                properties:
+                  name:
+                    description: Name is the name of the backing Service.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              enabled:
+                description: Enabled controls whether Pangolin serves the endpoint.
+                  Defaults to true.
+                type: boolean
+              private:
+                description: Private declares a mesh-only endpoint. Required in v1alpha1.
+                properties:
+                  access:
+                    description: Access names the principals permitted to reach the
+                      endpoint.
+                    properties:
+                      clients:
+                        description: Clients are Pangolin client names.
+                        items:
+                          type: string
+                        type: array
+                      roles:
+                        description: Roles are Pangolin role names.
+                        items:
+                          type: string
+                        type: array
+                      users:
+                        description: Users are Pangolin usernames.
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  alias:
+                    description: |-
+                      Alias is the internal FQDN that mesh clients dial. When unset it is
+                      derived as <name>.<namespace>.<suffix> from the controller's configured
+                      alias suffix; the controller refuses to derive an alias when no suffix
+                      is configured.
+                    type: string
+                  disableIcmp:
+                    description: DisableICMP suppresses ICMP to the destination.
+                    type: boolean
+                  ports:
+                    description: |-
+                      Ports exposed on the endpoint. When empty, the ports are taken from the
+                      backing Service on every reconcile -- meaning an unset Ports field
+                      tracks the Service, and adding a Service port widens the endpoint
+                      without a change to this object.
+                    items:
+                      description: |-
+                        EndpointPort declares one port, one inclusive range of ports, or every port
+                        for a protocol. Exactly one of the three forms must be used.
+                      properties:
+                        all:
+                          description: All exposes every port for the protocol.
+                          type: boolean
+                        from:
+                          description: From is the first port of an inclusive range.
+                            Must be set with To.
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        port:
+                          description: Port exposes a single port.
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        protocol:
+                          default: TCP
+                          description: Protocol of the exposed port.
+                          enum:
+                          - TCP
+                          - UDP
+                          type: string
+                        to:
+                          description: To is the last port of an inclusive range.
+                            Must be set with From.
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of port, (from and to), or all must be
+                          set
+                        rule: '(has(self.port) ? 1 : 0) + ((has(self.from) || has(self.to))
+                          ? 1 : 0) + ((has(self.all) && self.all) ? 1 : 0) == 1'
+                      - message: from and to must be set together
+                        rule: has(self.from) == has(self.to)
+                      - message: from must not be greater than to
+                        rule: '!has(self.from) || !has(self.to) || self.from <= self.to'
+                    type: array
+                type: object
+              public:
+                description: Public is reserved and rejected in v1alpha1.
+                type: object
+              siteRefs:
+                description: |-
+                  SiteRefs are the Pangolin site nice IDs to attach the endpoint to. When
+                  empty, the controller's configured default site is used.
+                items:
+                  type: string
+                type: array
+            required:
+            - backendRef
+            type: object
+            x-kubernetes-validations:
+            - message: 'spec.private is required: v1alpha1 implements the private
+                branch only'
+              rule: has(self.private)
+            - message: 'spec.public is reserved: the public raw TCP/UDP branch is
+                not implemented in v1alpha1'
+              rule: '!has(self.public)'
+          status:
+            description: PangolinEndpointStatus defines the observed state of a PangolinEndpoint.
+            properties:
+              address:
+                description: Address is the effective alias -- what mesh clients dial.
+                type: string
+              conditions:
+                description: Conditions report Accepted, ResolvedRefs, Programmed
+                  and Ready.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              niceId:
+                description: |-
+                  NiceID is the deterministic Pangolin nice ID derived from this object's
+                  namespace and name. It is the controller's identity for the endpoint and
+                  is how a lost SiteResourceID is recovered without creating a duplicate.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the generation of the spec this
+                  status reflects.
+                format: int64
+                type: integer
+              resolvedPorts:
+                description: ResolvedPorts is the port set that was sent to Pangolin.
+                properties:
+                  tcp:
+                    description: TCP is the resolved TCP port range string, e.g. "5432,8000-9000"
+                      or "*".
+                    type: string
+                  udp:
+                    description: UDP is the resolved UDP port range string.
+                    type: string
+                type: object
+              siteResourceId:
+                description: SiteResourceID is the Pangolin identifier of the private
+                  resource.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end }}

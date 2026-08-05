@@ -96,7 +96,7 @@ Private-resource create accepts a caller-supplied `niceId`. The controller sets:
 
 and recovers a lost `.status.siteResourceId` via `GET /org/{orgID}/site/{siteID}/resource/nice/{niceId}`. This makes identity a pure function of the CR's coordinates. There is no list-and-match adoption path and therefore no risk of claiming an object the controller does not own — a materially better position than the `Ingress` path's adopt-on-409, and the reason `v1alpha1` is private-only (public create accepts no `niceId`).
 
-`niceId` must match `^[a-zA-Z0-9-]+$`. Kubernetes names and namespaces are already DNS-1123 labels, so only the length ceiling (255) needs guarding; over-length combinations are rejected at validation time rather than silently truncated, because truncation could make two CRs collide on one identity.
+`niceId` must match `^[a-zA-Z0-9-]+$` and is capped at 255 characters. Namespaces are DNS-1123 *labels* and always fit, but object names are DNS-1123 *subdomains* and may contain dots — `db.primary` is a legal name that has no `niceId` expression. Both violations are refused (`Accepted=False`, reason `IdentityInvalid` or `IdentityTooLong`) rather than truncated or character-substituted: rewriting `db.primary` to `db-primary` would collide with an endpoint genuinely named `db-primary`, and two CRs sharing one identity would fight over a single Pangolin resource.
 
 ### D5: Structured ports, string serialization, semantic comparison
 
@@ -183,6 +183,24 @@ This follows the `errDomainNotFound` precedent already established in this repo:
 ### D11: CRD packaging in the Helm chart uses `templates/`, not `crds/`
 
 Helm's `crds/` directory is install-only — it never upgrades a CRD that already exists. For a `v1alpha1` API that is expected to change, that would silently strand users on the schema they first installed. The CRD therefore ships in `chart/templates/` behind a `crds.install` value (default `true`), so `helm upgrade` applies schema changes, and operators managing CRDs out-of-band can opt out. `deploy/crds/` gets the same manifest for the raw-manifest path, which finally makes the `Makefile`'s existing `install-crds` target functional.
+
+### D12: A separate `--name-cache-refresh-interval`
+
+Principal lookups get their own interval rather than sharing
+`--domain-cache-refresh-interval`. The two answer different questions -- how
+long a newly registered *domain* stays unresolvable, versus how long a newly
+created *role or client* does -- and they churn on different cadences. Sharing
+one knob would force an operator tuning principal lookups to also change
+domain-resolution latency. Both default to `60s`, so the distinction costs
+nothing until someone needs it.
+
+### D13: controller-gen v0.17.3, not the version matching k8s 0.28
+
+`controller-gen` is installed as its own module, so its dependencies are
+independent of `go.mod`. The version that pairs with k8s 0.28 (v0.13.0) pulls
+`golang.org/x/tools` v0.12.0, which does not compile under the Go 1.25 toolchain
+this module requires. v0.17.3 builds and emits the same `apiextensions/v1`
+output.
 
 ## Risks / Trade-offs
 
