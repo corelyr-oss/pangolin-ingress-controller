@@ -163,6 +163,13 @@ The effective alias is always reported in `.status.address`, so the CR answers "
 
 This mirrors what the `Ingress` path already does for target IPs, keeps the controller free of `Service` watches, and stays correct across Service recreation (the DNS name is stable, the `ClusterIP` is not).
 
+> **Verified 2026-08-06 (spike task 1.3).** Pangolin resolves the cluster DNS
+> name on the private data path: a mesh client fetched `HTTP 200` from the
+> backing Service through a resource whose `destination` was
+> `demo-svc.pangolin-mesh.svc.cluster.local`, both at the assigned mesh address
+> and via the alias, which mesh DNS resolves. The `ClusterIP` fallback and the
+> `Service` watch this decision was contingent on are **not needed**.
+
 **This is contingent on spike Q3.** Private resources travel a different data path from public targets, so the fact that cluster DNS resolves for targets today does not prove it resolves for private resources. If it does not, the fallback is the Service's `ClusterIP`, which requires the controller to watch `Service` objects and reconcile affected endpoints on `ClusterIP` change — new machinery, and a new class of drift. The spike runs before any code is written precisely because this branch point changes the shape of the reconciler.
 
 Headless Services (`clusterIP: None`) and `type: ExternalName` are rejected with `ResolvedRefs=False`: the former resolves to a shifting set of pod IPs, the latter has no cluster-local destination at all.

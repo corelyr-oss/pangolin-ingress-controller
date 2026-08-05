@@ -75,6 +75,11 @@ The condition still fires when no named principal has access, because that is
 the thing an operator needs to notice. The message states that org
 administrators reach the endpoint through Pangolin's implicit role.
 
+**Confirmed on the data path 2026-08-06.** An endpoint with no named principal
+was reached from a mesh client over the mesh (`HTTP 200`), so the implicit grant
+is real access and not a bookkeeping artefact. The reworded message is accurate:
+such an endpoint is reachable, just not by anyone the spec names.
+
 *Alternative rejected:* treating the implicit admin grant as "principals
 granted" and reporting `Ready=True`. Every endpoint would then be ready on
 creation, and the condition would stop carrying the one piece of information it
