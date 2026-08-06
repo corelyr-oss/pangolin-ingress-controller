@@ -24,26 +24,34 @@ type domainLister interface {
 // *pangolin.Client must satisfy domainLister.
 var _ domainLister = (*pangolin.Client)(nil)
 
-// domainCache caches the Pangolin domain list for the lifetime of the process.
+// lookupCache caches a list fetched from Pangolin for the lifetime of the
+// process.
 //
-// The list is fetched lazily on first use and refetched only when a host fails
-// to match, which is the sole case in which a stale cache can be wrong: a stale
-// entry can only ever cause a spurious miss, never a spurious hit. Resolutions
-// that hit the cache therefore cost no API calls at all.
+// The list is fetched lazily on first use and refetched only when a lookup
+// fails to match, which is the sole case in which a stale cache can be wrong: a
+// stale entry can only ever cause a spurious miss, never a spurious hit.
+// Lookups that hit the cache therefore cost no API calls at all.
 //
 // Refetches are rate-limited by interval, counted from the last *attempt*
-// rather than the last success. A miss that is retried across many Ingresses
-// (or under controller-runtime's backoff) consequently cannot amplify into
+// rather than the last success. A miss that is retried across many objects (or
+// under controller-runtime's backoff) consequently cannot amplify into
 // sustained Pangolin API load, and neither can a Pangolin outage.
-type domainCache struct {
-	lister   domainLister
+//
+// The same semantics serve every name-to-identifier lookup the controller
+// performs -- domains, roles and clients -- because they are the same problem:
+// a mapping where a miss means either "does not exist" or "was created after we
+// cached".
+type lookupCache[T any] struct {
+	// label names the listed objects in error text, e.g. "domains".
+	label    string
+	fetch    func(ctx context.Context) ([]T, error)
 	interval time.Duration
 	now      func() time.Time
 
 	// domainMu guards the fields below. It is held only for field access,
 	// never across the network call.
 	domainMu    sync.RWMutex
-	entries     []pangolin.Domain
+	entries     []T
 	fetchedAt   time.Time
 	lastAttempt time.Time
 
@@ -52,18 +60,40 @@ type domainCache struct {
 	fetchMu sync.Mutex
 }
 
-// newDomainCache builds a cache over lister. An interval of zero or less
+// domainCache is the domain-list instantiation of lookupCache.
+type domainCache = lookupCache[pangolin.Domain]
+
+// newLookupCache builds a cache over fetch. An interval of zero or less
 // disables refresh-on-miss, restoring fetch-once-per-process behaviour.
-func newDomainCache(lister domainLister, interval time.Duration) *domainCache {
-	return &domainCache{
-		lister:   lister,
+func newLookupCache[T any](label string, fetch func(ctx context.Context) ([]T, error), interval time.Duration) *lookupCache[T] {
+	return &lookupCache[T]{
+		label:    label,
+		fetch:    fetch,
 		interval: interval,
 		now:      time.Now,
 	}
 }
 
-// get returns the cached domain list, fetching it if the cache is cold.
-func (c *domainCache) get(ctx context.Context) ([]pangolin.Domain, error) {
+// newDomainCache builds a cache over lister. An interval of zero or less
+// disables refresh-on-miss, restoring fetch-once-per-process behaviour.
+func newDomainCache(lister domainLister, interval time.Duration) *domainCache {
+	return newLookupCache("domains", func(ctx context.Context) ([]pangolin.Domain, error) {
+		domains, err := lister.ListDomains(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		// Sort by BaseDomain length descending so that suffix matching prefers
+		// the longest (most specific) match.
+		sort.Slice(domains, func(i, j int) bool {
+			return len(domains[i].BaseDomain) > len(domains[j].BaseDomain)
+		})
+		return domains, nil
+	}, interval)
+}
+
+// get returns the cached entries, fetching them if the cache is cold.
+func (c *lookupCache[T]) get(ctx context.Context) ([]T, error) {
 	c.domainMu.RLock()
 	entries := c.entries
 	c.domainMu.RUnlock()
@@ -86,10 +116,10 @@ func (c *domainCache) get(ctx context.Context) ([]pangolin.Domain, error) {
 	return c.fetchLocked(ctx)
 }
 
-// refreshIfStale refetches the domain list when the cooldown has elapsed,
+// refreshIfStale refetches the entries when the cooldown has elapsed,
 // reporting the refreshed entries and whether a refresh took place. It is the
-// recovery path for a domain registered in Pangolin after this process started.
-func (c *domainCache) refreshIfStale(ctx context.Context) (entries []pangolin.Domain, refreshed bool, err error) {
+// recovery path for an object created in Pangolin after this process started.
+func (c *lookupCache[T]) refreshIfStale(ctx context.Context) (entries []T, refreshed bool, err error) {
 	if c.interval <= 0 {
 		return nil, false, nil
 	}
@@ -123,32 +153,26 @@ func (c *domainCache) refreshIfStale(ctx context.Context) (entries []pangolin.Do
 // failing Pangolin API is retried on the cooldown rather than on every
 // reconcile. entries and fetchedAt advance only on success, so a failed refresh
 // never discards a good cache.
-func (c *domainCache) fetchLocked(ctx context.Context) ([]pangolin.Domain, error) {
+func (c *lookupCache[T]) fetchLocked(ctx context.Context) ([]T, error) {
 	c.domainMu.Lock()
 	c.lastAttempt = c.now()
 	c.domainMu.Unlock()
 
-	domains, err := c.lister.ListDomains(ctx)
+	entries, err := c.fetch(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list Pangolin domains: %w", err)
+		return nil, fmt.Errorf("failed to list Pangolin %s: %w", c.label, err)
 	}
 
-	// Sort by BaseDomain length descending so that suffix matching prefers the
-	// longest (most specific) match.
-	sort.Slice(domains, func(i, j int) bool {
-		return len(domains[i].BaseDomain) > len(domains[j].BaseDomain)
-	})
-
 	c.domainMu.Lock()
-	c.entries = domains
+	c.entries = entries
 	c.fetchedAt = c.now()
 	c.domainMu.Unlock()
 
-	return domains, nil
+	return entries, nil
 }
 
 // stale reports whether the cooldown since the last fetch attempt has elapsed.
-func (c *domainCache) stale() bool {
+func (c *lookupCache[T]) stale() bool {
 	c.domainMu.RLock()
 	defer c.domainMu.RUnlock()
 
@@ -159,9 +183,9 @@ func (c *domainCache) stale() bool {
 }
 
 // describe reports cache freshness for diagnostics. It deliberately returns a
-// count rather than the domains themselves: this text reaches Kubernetes
-// Events, which are not the right surface for the org's full domain inventory.
-func (c *domainCache) describe() (count int, lastRefresh string) {
+// count rather than the entries themselves: this text reaches Kubernetes
+// Events, which are not the right surface for the org's full inventory.
+func (c *lookupCache[T]) describe() (count int, lastRefresh string) {
 	c.domainMu.RLock()
 	defer c.domainMu.RUnlock()
 

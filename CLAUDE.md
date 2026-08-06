@@ -57,12 +57,72 @@ All controller-recognized annotations are constants at the top of `internal/cont
 - `client.go` — thin HTTP client. Bearer auth, 30s timeout. `ConflictError` + `IsConflict(err)` are the canonical way to detect 409s (used by the adopt-on-conflict path).
 - `resources.go` — typed request/response structs and CRUD for `Resource`, `Target`, `Site`, `Domain`. Pangolin's API uses `PUT` for create and `POST` for update on resources/targets, scoped by `/v1/org/{orgID}/...`. JSON request fields use omitempty pointers so partial updates only touch the fields the user has annotated.
 
+### PangolinEndpoint CRD (`api/v1alpha1/`, `internal/controller/pangolinendpoint_controller.go`)
+
+The repo's only CRD, in group **`pangolin.corelyr.com`** — deliberately *not*
+`pangolin.ingress.k8s.io` (the Ingress annotation prefix). The apiserver treats
+any group under `k8s.io`/`kubernetes.io` as a protected community group and
+rejects a CRD in one outright unless it carries an `api-approved.kubernetes.io`
+annotation naming a Kubernetes API review. The annotation prefix on the
+`Ingress` path is unaffected — that rule applies to API groups, not annotation
+keys — so the two intentionally differ.
+
+`PangolinEndpoint` covers Pangolin **private resources**
+(mesh-only endpoints, called *site resources* in the older API surface), which
+cannot be modelled as an `Ingress`: no public hostname, no TLS, no HTTP
+semantics, and mandatory access control. It is a second, independent reconciler
+— the `Ingress` path is untouched and the two share only the API client.
+
+Deliberate differences from the `Ingress` path, all recorded in
+`openspec/changes/add-private-endpoint-crd/design.md`:
+
+- **State lives in `.status`, not annotations.** Status writes do not bump
+  `metadata.generation`, so a plain `GenerationChangedPredicate` suffices —
+  none of `controllerManagedAnnotations` or the annotation predicate is needed.
+- **Identity is deterministic.** The controller sets a Pangolin `niceId` of
+  `<prefix>-<namespace>-<name>` and recovers a lost `.status.siteResourceId`
+  via `GET /org/{orgID}/site/{siteID}/resource/nice/{niceId}`. There is **no**
+  adopt-by-matching path, unlike the Ingress adopt-on-409 — private create
+  accepts a caller-supplied nice ID, so identity is never guessed.
+- **`mode` is hardcoded to `host`** and not exposed, because `backendRef` is
+  always a Service. This is what keeps `scheme`, `ssl`, `authDaemon*`,
+  `pamMode`, `domainId` and `subdomain` out of the API.
+- **`spec.public` is declared but rejected** by CEL. It has to exist as a field
+  to be rejected at all — a structural schema prunes undeclared fields
+  silently.
+
+Two invariants that are easy to break:
+
+1. **Port comparison is semantic, not textual** (`internal/controller/ports.go`).
+   Pangolin may normalise a port list on the way in (reorder, merge adjacent,
+   deduplicate). Comparing serialized strings would report a difference on every
+   reconcile and update forever. `TestEndpoint_UnchangedReconcileIssuesNoUpdate`
+   is the regression guard.
+2. **`UpdateSiteResourceRequest.DestinationPort` is not `omitempty`.** A nil
+   pointer must reach Pangolin as an explicit `null` so a previously set port is
+   cleared; omitting it leaves a value the controller can never converge on,
+   which is exactly the update loop from (1).
+
+`domainCache` has been generalized into `lookupCache[T]`
+(`internal/controller/domain_cache.go`) and is instantiated for domains, roles
+and clients; usernames use `userLookup`, a cache in front of point queries.
+Domain behaviour is unchanged — `domain_cache_test.go` passes unmodified and
+should stay that way.
+
+**Blocking spike.** `openspec/changes/add-private-endpoint-crd/tasks.md` section 1
+lists eight questions that need a live Pangolin instance. Site-resource response
+field names, and whether Pangolin resolves cluster DNS on the private data path,
+are assumptions until then; both are flagged with `SPIKE (task N)` comments in
+the code.
+
 ### Deployment artifacts
 
 Two parallel ways to ship:
 
 - `deploy/` — raw manifests (`kubectl apply -f deploy/`)
 - `chart/` — Helm chart (image defaults to `ghcr.io/corelyr-oss/pangolin-ingress-controller`)
+
+CRD manifests are generated: `make manifests` writes `deploy/crds/` and copies the result into `chart/templates/crd-pangolinendpoint.yaml` (wrapped in a `crds.install` guard by `hack/wrap-crd-template.sh`). The CRD lives in the chart's `templates/` rather than `crds/` on purpose — Helm never upgrades a CRD shipped in `crds/`, which would strand users on the first `v1alpha1` schema they installed. `make generate` regenerates deepcopy functions; both run as part of `make build`/`make test`.
 
 When changing required flags or RBAC, update **both** `deploy/deployment.yaml`/`deploy/clusterrole.yaml` and `chart/templates/deployment.yaml`/`chart/templates/clusterrole.yaml`. The kubebuilder RBAC markers above `IngressReconciler` (`//+kubebuilder:rbac:...`) document what the controller needs but do not auto-generate the YAML in this repo.
 

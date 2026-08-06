@@ -432,6 +432,100 @@ spec:
               number: 8080
 ```
 
+## PangolinEndpoint (private endpoints)
+
+An `Ingress` can only describe an HTTP resource reachable at a public hostname.
+Pangolin also supports **private resources** — endpoints with no public
+entrypoint at all, reachable only by clients connected to the Pangolin mesh at
+an internal FQDN. Those are declared with the `PangolinEndpoint` custom
+resource.
+
+> **Alpha.** `pangolin.corelyr.com/v1alpha1` may change in
+> backwards-incompatible ways. Only the private branch is implemented;
+> `spec.public` is reserved and rejected.
+
+```yaml
+apiVersion: pangolin.corelyr.com/v1alpha1
+kind: PangolinEndpoint
+metadata:
+  name: postgres
+  namespace: data
+spec:
+  backendRef:
+    name: postgres            # Service in the same namespace
+  private:
+    ports:
+      - {protocol: TCP, port: 5432}
+      - {protocol: TCP, from: 8000, to: 9000}
+    access:
+      roles: [developers]     # Pangolin names, not internal IDs
+      clients: [my-laptop]
+      users: [someone@example.com]
+```
+
+```console
+$ kubectl get pangolinendpoints -n data
+NAME       ADDRESS                       PORTS            READY   AGE
+postgres   postgres.data.corp.internal   5432,8000-9000   True    30s
+```
+
+### Spec fields
+
+| Field | Description |
+|-------|-------------|
+| `backendRef.name` | Service in the same namespace. Its cluster DNS name becomes the Pangolin destination. Headless and `ExternalName` Services are rejected |
+| `siteRefs` | Pangolin site nice IDs. Defaults to `--pangolin-site-nice-id` |
+| `enabled` | Whether Pangolin serves the endpoint. Defaults to `true` |
+| `private.alias` | The internal FQDN clients dial. Derived when unset — see below |
+| `private.ports[]` | `{protocol, port}`, `{protocol, from, to}` or `{protocol, all: true}`. Exactly one form per entry. **When omitted, the ports are taken from the backing Service** |
+| `private.access.roles/clients/users` | Pangolin principal **names**; the controller resolves them to IDs |
+| `private.disableIcmp` | Suppress ICMP to the destination |
+
+### Alias derivation
+
+When `spec.private.alias` is unset the controller derives
+`<name>.<namespace>.<suffix>` using `--private-alias-suffix`.
+
+**The suffix has no default and must be set.** Aliases are unique across a
+Pangolin organization, so a shipped default would make two clusters sharing one
+org collide on the same alias. Until it is set, endpoints without an explicit
+alias report `Accepted=False` with reason `AliasSuffixNotConfigured`.
+
+Changing the suffix rewrites the alias of every endpoint that derives one,
+which changes the address clients dial.
+
+### Ports follow the Service when unset
+
+Leaving `private.ports` empty means "track the Service": the port set is
+re-derived on every reconcile, so **adding a port to the Service widens the
+endpoint** without any change to the `PangolinEndpoint`. `.status.resolvedPorts`
+always shows what was actually sent. Set `private.ports` explicitly to pin the
+exposure. SCTP Service ports are skipped — Pangolin private resources carry
+only TCP and UDP.
+
+### Status
+
+| Condition | `False` means |
+|-----------|---------------|
+| `Accepted` | The spec cannot be acted on: no alias suffix configured, an identity that Pangolin cannot express, or an instance that does not implement private resources |
+| `ResolvedRefs` | Something the spec points at is missing or ambiguous: the Service, a site, or a named role/user/client |
+| `Programmed` | Pangolin rejected, or has not yet accepted, the configuration |
+| `Ready` | Summary. `NoPrincipalsGranted` means the endpoint exists but grants access to nobody |
+
+All four are operator-fixable conditions: they are reported as events and
+requeued rather than returned as controller errors, so they do not ride
+exponential backoff or inflate `controller_runtime_reconcile_errors_total`.
+
+### Identity
+
+The controller derives a deterministic Pangolin `niceId` of
+`<resource-prefix>-<namespace>-<name>` and re-finds its resource by that ID if
+`.status` is lost. It never claims a Pangolin resource by matching attributes,
+so it cannot adopt one it does not own. A name that cannot be expressed as a
+nice ID (anything outside `[a-zA-Z0-9-]`, e.g. a dot in the object name) is
+refused rather than rewritten, since rewriting could collapse two endpoints
+onto one identity.
+
 ## Configuration
 
 ### Controller Arguments
@@ -448,6 +542,9 @@ The controller accepts the following command-line arguments:
 | `--pangolin-site-nice-id` | _none_ | **Required** Pangolin site nice ID that should host created targets |
 | `--resource-prefix` | `pangolin-controller` | Prefix for Pangolin resource names (resources are named `{prefix}-{host}`) |
 | `--domain-cache-refresh-interval` | `60s` | How often at most the Pangolin domain list is refetched after an Ingress host fails to match. Bounds how long a domain registered after controller startup stays unresolvable. `0` disables refreshing (restart required to pick up new domains) |
+| `--name-cache-refresh-interval` | `60s` | How often at most the Pangolin role and client lists are refetched after a principal named on a `PangolinEndpoint` fails to resolve. `0` disables refreshing |
+| `--private-alias-suffix` | _none_ | DNS suffix used to derive a `PangolinEndpoint` alias as `<name>.<namespace>.<suffix>`. Required for endpoints that do not set `spec.private.alias`; deliberately has no default |
+| `--cluster-domain` | `svc.cluster.local` | Cluster DNS suffix used to address backing Services |
 | `--metrics-bind-address` | `:8080` | Address for Prometheus metrics endpoint |
 | `--health-probe-bind-address` | `:8081` | Address for health/readiness probes |
 | `--leader-elect` | `false` | Enable leader election for HA |

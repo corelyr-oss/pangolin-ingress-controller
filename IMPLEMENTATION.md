@@ -50,6 +50,26 @@ Per-resource auth sub-endpoints (optional; 404/405 is tolerated):
 - `GET /v1/resource/{id}/users` - List currently assigned user IDs
 - `POST /v1/resource/{id}/users` - Replace user assignments (`{"userIds": [...]}`, string IDs)
 
+Private (site) resource endpoints, used by the `PangolinEndpoint` controller.
+The controller targets the older `site-resource` path rather than the newer
+`private-resource` alias: both are live in the current API, but only the old
+name is present on older self-hosted builds, so it is the wider compatibility
+set. 404/405 is tolerated and reported as `UnsupportedByServer`.
+
+- `PUT /v1/org/{orgId}/site-resource` - Create a private resource (`mode: host`, `destination`, `alias`, `tcpPortRangeString`/`udpPortRangeString`, and the required `userIds`/`roleIds`/`clientIds`)
+- `GET /v1/site-resource/{id}` - Get a private resource
+- `POST /v1/site-resource/{id}` - Update a private resource (`destinationPort` is nullable and always sent, so it can be cleared)
+- `DELETE /v1/site-resource/{id}` - Delete a private resource
+- `GET /v1/org/{orgId}/site/{siteId}/resource/nice/{niceId}` - Look a private resource up by its caller-supplied nice ID; this is how a lost `.status.siteResourceId` is recovered
+- `GET|POST /v1/site-resource/{id}/roles|users|clients` - Read and replace principal assignments
+
+Name resolution endpoints (paginated — Pangolin defaults these to 20 items per
+page, so the client follows pages):
+
+- `GET /v1/org/{orgId}/roles` - Resolve role names to role IDs
+- `GET /v1/org/{orgId}/clients` - Resolve client names to client IDs
+- `GET /v1/org/{orgId}/user-by-username` - Resolve a username to a user ID
+
 ### Authentication
 
 The controller authenticates with the Pangolin API using a Bearer token:

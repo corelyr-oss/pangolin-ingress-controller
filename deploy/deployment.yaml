@@ -38,6 +38,14 @@ spec:
         # fails to resolve. Bounds how long a newly registered domain stays
         # unresolvable. Set to 0 to require a restart instead.
         - --domain-cache-refresh-interval=60s
+        # How often at most the Pangolin role and client lists are refetched
+        # after a principal named on a PangolinEndpoint fails to resolve.
+        - --name-cache-refresh-interval=60s
+        # DNS suffix used to derive a PangolinEndpoint's internal alias as
+        # <name>.<namespace>.<suffix>. Required for endpoints that do not set
+        # spec.private.alias themselves; aliases are unique per Pangolin org,
+        # so there is deliberately no default.
+        # - --private-alias-suffix=corp.internal
         env:
         - name: PANGOLIN_BASE_URL
           value: "https://api.pangolin.net"

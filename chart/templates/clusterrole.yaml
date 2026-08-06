@@ -49,6 +49,32 @@ rules:
   - list
   - watch
 - apiGroups:
+  - pangolin.corelyr.com
+  resources:
+  - pangolinendpoints
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - pangolin.corelyr.com
+  resources:
+  - pangolinendpoints/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - pangolin.corelyr.com
+  resources:
+  - pangolinendpoints/finalizers
+  verbs:
+  - update
+- apiGroups:
   - ""
   resources:
   - events

@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/vinzenz/pangolin-ingress-controller/api/v1alpha1"
 	"github.com/vinzenz/pangolin-ingress-controller/internal/controller"
 )
 
@@ -25,6 +26,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 }
 
 func main() {
@@ -39,6 +41,9 @@ func main() {
 	var pangolinSiteNiceID string
 	var resourcePrefix string
 	var domainCacheRefreshInterval time.Duration
+	var nameCacheRefreshInterval time.Duration
+	var privateAliasSuffix string
+	var clusterDomain string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -56,6 +61,18 @@ func main() {
 		"How often at most the Pangolin domain list may be refetched after a host fails to resolve. "+
 			"Bounds how long a newly registered Pangolin domain stays unresolvable. Set to 0 to disable "+
 			"refreshing, in which case a controller restart is required to pick up new domains.")
+	flag.DurationVar(&nameCacheRefreshInterval, "name-cache-refresh-interval", 60*time.Second,
+		"How often at most the Pangolin role and client lists may be refetched after a principal name "+
+			"fails to resolve. Bounds how long a newly created role or client stays unresolvable. Kept "+
+			"separate from --domain-cache-refresh-interval because principals churn on a different "+
+			"cadence than domains. Set to 0 to disable refreshing.")
+	flag.StringVar(&privateAliasSuffix, "private-alias-suffix", "",
+		"DNS suffix used to derive the internal alias of a PangolinEndpoint as <name>.<namespace>.<suffix>. "+
+			"Has no default: aliases are unique across a Pangolin organization, so two clusters sharing an "+
+			"org would collide. Endpoints without an explicit spec.private.alias are not programmed until "+
+			"this is set.")
+	flag.StringVar(&clusterDomain, "cluster-domain", "svc.cluster.local",
+		"Cluster DNS suffix used to address backing Services.")
 
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
@@ -98,6 +115,24 @@ func main() {
 		DomainCacheRefreshInterval: domainCacheRefreshInterval,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Ingress")
+		os.Exit(1)
+	}
+
+	if err = (&controller.PangolinEndpointReconciler{
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		ResourcePrefix:  resourcePrefix,
+		PangolinBaseURL: pangolinBaseURL,
+		APIKeySecret:    pangolinAPIKeySecret,
+		APIKeyNamespace: pangolinAPIKeyNamespace,
+		OrgID:           pangolinOrgID,
+		SiteNiceID:      pangolinSiteNiceID,
+		AliasSuffix:     privateAliasSuffix,
+		ClusterDomain:   clusterDomain,
+
+		NameCacheRefreshInterval: nameCacheRefreshInterval,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "PangolinEndpoint")
 		os.Exit(1)
 	}
 
