@@ -21,7 +21,50 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -race -coverprofile=cover.out
+
+      - name: Check generated manifests are up to date
+        run: |
+          # controller-gen output is committed. If it drifts from the types,
+          # the CRD shipped in deploy/ and the chart stops matching the API the
+          # controller actually serves.
+          make generate manifests
+          if ! git diff --exit-code -- api/ deploy/crds/ chart/templates/crd-pangolinendpoint.yaml; then
+            echo "Generated files are out of date. Run: make generate manifests"
+            exit 1
+          fi
+
   build-and-push:
+    # Publishing an image whose tests fail is worse than not publishing one.
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
