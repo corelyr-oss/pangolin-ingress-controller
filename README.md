@@ -35,9 +35,74 @@ The Pangolin Ingress Controller is built using the Kubernetes controller-runtime
 - Kubernetes cluster (1.24+)
 - kubectl configured to access your cluster
 - **Pangolin instance** (self-hosted or cloud) - [Get started](https://pangolin.net)
-- **Pangolin API key** with resource management permissions
+- **Pangolin API key** scoped to your organization, with the permissions listed
+  under [API key permissions](#api-key-permissions)
 - Docker (for building images)
 - Go 1.21+ (for development)
+
+## API key permissions
+
+The controller authenticates to Pangolin with a single organization-scoped API
+key. Grant exactly the permissions below — each is listed with what needs it,
+so you can drop whole rows if you do not use that feature.
+
+Permission names are the labels shown in **Organization → API Keys → Permissions**.
+
+### Required
+
+| Group | Permission | Needed for |
+| --- | --- | --- |
+| Domain | List Organization Domains | Resolving an Ingress host to a Pangolin domain |
+| Site | Get Site | Looking up the configured site, and the `proxyIp` reported in Ingress status |
+| Resource | Create Resource, Get Resource, List Resources, Update Resource, Delete Resource | The `Ingress` path: creating and converging the public resource, and adopting an existing one after an annotation is lost |
+| Target | Create Target, Get Target, List Targets, Update Target, Delete Target | Pointing a resource at the backing Service |
+
+### Required for `PangolinEndpoint` (private endpoints)
+
+| Group | Permission | Needed for |
+| --- | --- | --- |
+| Resource | Create Site Resource, List Site Resources, Update Site Resource, Delete Site Resource | Creating and converging a private resource, and re-finding it by its nice ID |
+| Role | List Roles | Resolving `spec.private.access.roles` names to IDs |
+| Client | List Clients | Resolving `spec.private.access.clients` names to IDs |
+| Organization | Get Organization User | Resolving `spec.private.access.users` names to IDs |
+
+Grant the three lookup permissions only for the principal types you actually
+name. An endpoint that names no clients does not need **List Clients**, and a
+missing lookup permission surfaces as `ResolvedRefs=False` on the object rather
+than as a silent failure.
+
+### Required only for the auth-method annotations
+
+| Group | Permission | Needed for |
+| --- | --- | --- |
+| Resource | Set Resource Password | `pangolin.ingress.k8s.io/password-secret-ref` |
+| Resource | Set Resource Pincode | `pangolin.ingress.k8s.io/pincode-secret-ref` |
+| Resource | Get Resource Email Whitelist, Set Resource Email Whitelist | `pangolin.ingress.k8s.io/email-whitelist` |
+| Resource | List Allowed Resource Roles, Set Allowed Resource Roles | `pangolin.ingress.k8s.io/role-ids` |
+| Resource | List Resource Users, Set Resource Users | `pangolin.ingress.k8s.io/user-ids` |
+
+### Not needed
+
+Granting these is harmless, but the controller never calls them, and a
+least-privilege key can leave them off:
+
+- **List Users** — user lookup goes through *Get Organization User* by username
+- **List Sites** — the site is fetched by its configured nice ID, never listed
+- **Get Site Resource** — the private-resource point read is unusable on current
+  Pangolin builds (it rejects every request), so the controller reads private
+  resources out of *List Site Resources* instead
+- **Resource Rule** (all) — `apply-rules` sets a field on the resource itself;
+  the controller does not manage rule objects
+- **Resource Policy**, **Access Token**, **Site Provisioning Key**, **Logs**,
+  and everything under **Organization** other than *Get Organization User*
+
+### Note on editing permissions
+
+Pangolin's permission editor replaces the key's permission set rather than
+adding to it. Adding a permission has been observed to silently drop others —
+after any change, re-check the whole set, not just the entry you edited. A key
+that loses *List Roles* keeps working until something names a role, and then
+fails with `PrincipalNotFound`.
 
 ## Installation
 
@@ -47,7 +112,8 @@ The Pangolin Ingress Controller is built using the Kubernetes controller-runtime
 
    - Log in to your Pangolin dashboard
    - Navigate to **Organization → API Keys**
-   - Create a new API key with resource management permissions
+   - Create a new API key scoped to your organization and grant it the
+     permissions in [API key permissions](#api-key-permissions)
    - Copy the API key
 
 2. **Create the API key secret:**
