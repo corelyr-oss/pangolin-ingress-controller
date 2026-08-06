@@ -141,14 +141,6 @@ type IngressReconciler struct {
 func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
-	// Initialize Pangolin client if needed
-	if r.PangolinClient == nil {
-		if err := r.initPangolinClient(ctx); err != nil {
-			log.Error(err, "Failed to initialize Pangolin client")
-			return ctrl.Result{}, err
-		}
-	}
-
 	// Fetch the Ingress instance
 	ingress := &networkingv1.Ingress{}
 	err := r.Get(ctx, req.NamespacedName, ingress)
@@ -167,6 +159,20 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if !r.isManaged(ingress) {
 		log.V(1).Info("Ingress not managed by this controller", "ingressClass", r.IngressClass)
 		return ctrl.Result{}, nil
+	}
+
+	// Initialize the Pangolin client if needed.
+	//
+	// This happens after the class check, not before: the controller watches
+	// every Ingress in the cluster, and an Ingress belonging to another
+	// controller is none of its business. Initializing first meant a cluster
+	// with no Pangolin credentials failed -- and retried, and counted a
+	// reconcile error -- for every foreign Ingress it would then have ignored.
+	if r.PangolinClient == nil {
+		if err := r.initPangolinClient(ctx); err != nil {
+			log.Error(err, "Failed to initialize Pangolin client")
+			return ctrl.Result{}, err
+		}
 	}
 
 	log.Info("Reconciling Ingress", "name", ingress.Name, "namespace", ingress.Namespace)
@@ -389,12 +395,22 @@ func (r *IngressReconciler) initPangolinClient(ctx context.Context) error {
 		return fmt.Errorf("api-key not found in secret %s/%s", r.APIKeyNamespace, r.APIKeySecret)
 	}
 
-	r.PangolinClient = pangolin.NewClient(r.PangolinBaseURL, string(apiKey), r.OrgID)
-	r.domains = newDomainCache(r.PangolinClient, r.DomainCacheRefreshInterval)
+	r.setPangolinClient(pangolin.NewClient(r.PangolinBaseURL, string(apiKey), r.OrgID))
 	log.Info("Initialized Pangolin client", "baseURL", r.PangolinBaseURL,
 		"domainCacheRefreshInterval", r.DomainCacheRefreshInterval)
 
 	return nil
+}
+
+// setPangolinClient installs the client and the domain cache that reads
+// through it.
+//
+// The two are set together because the cache is useless without the client and
+// the reconcile fails with "domain cache is not initialized" without the cache.
+// Assigning PangolinClient directly is what leaves that invariant broken.
+func (r *IngressReconciler) setPangolinClient(c *pangolin.Client) {
+	r.PangolinClient = c
+	r.domains = newDomainCache(c, r.DomainCacheRefreshInterval)
 }
 
 // domainRequeueAfter is the retry delay for a host that matches no Pangolin
