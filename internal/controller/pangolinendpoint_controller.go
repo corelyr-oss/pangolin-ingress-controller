@@ -155,7 +155,7 @@ func (r *PangolinEndpointReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	var issue *endpointIssue
 	if errors.As(reconcileErr, &issue) {
 		r.applyIssue(ep, issue)
-		if err := r.updateStatus(ctx, ep); err != nil {
+		if err := r.updateStatus(ctx, ep, false); err != nil {
 			return ctrl.Result{}, err
 		}
 		if r.Recorder != nil {
@@ -172,13 +172,13 @@ func (r *PangolinEndpointReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// still shows why it is not programmed.
 		setCondition(ep, v1alpha1.ConditionProgrammed, metav1.ConditionFalse, v1alpha1.ReasonPangolinError, reconcileErr.Error())
 		setCondition(ep, v1alpha1.ConditionReady, metav1.ConditionFalse, v1alpha1.ReasonPangolinError, reconcileErr.Error())
-		if err := r.updateStatus(ctx, ep); err != nil {
+		if err := r.updateStatus(ctx, ep, false); err != nil {
 			log.Error(err, "Failed to update status after reconcile error")
 		}
 		return ctrl.Result{}, reconcileErr
 	}
 
-	if err := r.updateStatus(ctx, ep); err != nil {
+	if err := r.updateStatus(ctx, ep, true); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -748,10 +748,16 @@ func (r *PangolinEndpointReconciler) applyIssue(ep *v1alpha1.PangolinEndpoint, i
 
 // updateStatus writes observed state, setting the success conditions when the
 // reconcile got far enough to program Pangolin.
-func (r *PangolinEndpointReconciler) updateStatus(ctx context.Context, ep *v1alpha1.PangolinEndpoint) error {
+//
+// reconcileOK must come from the caller's own outcome, never be re-derived from
+// the conditions already on ep. Those may have been written by an earlier
+// reconcile of the same generation — a controller restarted with corrected
+// configuration reconciles the very same generation it previously failed on —
+// and are therefore no evidence about the pass that is running now.
+func (r *PangolinEndpointReconciler) updateStatus(ctx context.Context, ep *v1alpha1.PangolinEndpoint, reconcileOK bool) error {
 	ep.Status.ObservedGeneration = ep.Generation
 
-	if ep.Status.SiteResourceID != "" && !hasFalseCondition(ep) {
+	if ep.Status.SiteResourceID != "" && reconcileOK {
 		setCondition(ep, v1alpha1.ConditionAccepted, metav1.ConditionTrue, v1alpha1.ReasonReconciled, "spec accepted")
 		setCondition(ep, v1alpha1.ConditionResolvedRefs, metav1.ConditionTrue, v1alpha1.ReasonReconciled, "all references resolved")
 		setCondition(ep, v1alpha1.ConditionProgrammed, metav1.ConditionTrue, v1alpha1.ReasonReconciled, "Pangolin private resource is up to date")
@@ -772,18 +778,6 @@ func (r *PangolinEndpointReconciler) updateStatus(ctx context.Context, ep *v1alp
 		return fmt.Errorf("failed to update PangolinEndpoint status: %w", err)
 	}
 	return nil
-}
-
-func hasFalseCondition(ep *v1alpha1.PangolinEndpoint) bool {
-	for _, t := range []string{v1alpha1.ConditionAccepted, v1alpha1.ConditionResolvedRefs, v1alpha1.ConditionProgrammed} {
-		if c := meta.FindStatusCondition(ep.Status.Conditions, t); c != nil && c.Status == metav1.ConditionFalse {
-			// Only treat it as failing if it reflects the current generation.
-			if c.ObservedGeneration == ep.Generation {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func grantsNoPrincipals(ep *v1alpha1.PangolinEndpoint) bool {
