@@ -786,6 +786,44 @@ func TestEndpoint_AliasSuffixNotConfigured(t *testing.T) {
 	}
 }
 
+// An operator who corrects controller configuration restarts the controller,
+// which reconciles the same generation it previously failed on: the spec never
+// changed. The failure conditions from the earlier pass must not survive that,
+// or a working endpoint reports a failure that is not real and invites the
+// operator to keep changing configuration that is already correct.
+func TestEndpoint_ConditionsClearAfterConfigFixWithoutGenerationBump(t *testing.T) {
+	ep := testEndpoint()
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+	env.reconciler.AliasSuffix = ""
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertCondition(t, env.get(ep), v1alpha1.ConditionAccepted, metav1.ConditionFalse, v1alpha1.ReasonAliasSuffixNotConfigured)
+
+	// The operator sets the flag and restarts. The spec is untouched, so the
+	// generation is still the one that failed.
+	env.reconciler.AliasSuffix = "corp.internal"
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := env.get(ep)
+	if got.Generation != 1 {
+		t.Fatalf("generation = %d, want 1; the test no longer covers what it claims to", got.Generation)
+	}
+	assertCondition(t, got, v1alpha1.ConditionAccepted, metav1.ConditionTrue, v1alpha1.ReasonReconciled)
+	assertCondition(t, got, v1alpha1.ConditionResolvedRefs, metav1.ConditionTrue, v1alpha1.ReasonReconciled)
+	assertCondition(t, got, v1alpha1.ConditionProgrammed, metav1.ConditionTrue, v1alpha1.ReasonReconciled)
+
+	// The contradiction this guards against: observed state that could only
+	// have been derived with the suffix, sitting beside a condition saying the
+	// suffix is unset.
+	if got.Status.Address == "" {
+		t.Fatal("expected an address once the suffix is configured")
+	}
+}
+
 func TestEndpoint_ExplicitAliasOverridesDerivation(t *testing.T) {
 	ep := testEndpoint(func(ep *v1alpha1.PangolinEndpoint) {
 		ep.Spec.Private.Alias = "db.internal"
