@@ -6,7 +6,11 @@ This Helm chart deploys the Pangolin Ingress Controller to your Kubernetes clust
 
 - Kubernetes 1.19+
 - Helm 3.0+
-- A valid Pangolin API key
+- A valid Pangolin API key, scoped to your organization and carrying the
+  permissions listed in
+  [API key permissions](https://github.com/corelyr-oss/pangolin-ingress-controller#api-key-permissions)
+  — a key missing one of the principal lookups reports `ResolvedRefs=False` on
+  the affected object rather than failing loudly at startup
 
 ## Installation
 
