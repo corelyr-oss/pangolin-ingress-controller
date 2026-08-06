@@ -13,7 +13,10 @@ COPY go.sum go.sum
 # Cache deps before building and copying source
 RUN go mod download
 
-# Copy the source code
+# Copy the source code. Every package main imports has to be listed here: the
+# build context is copied selectively, so a new top-level package compiles
+# locally and then fails only in the image build.
+COPY api/ api/
 COPY cmd/ cmd/
 COPY internal/ internal/
 
