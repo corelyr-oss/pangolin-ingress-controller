@@ -46,21 +46,29 @@ func newPrincipalResolver(client *pangolin.Client, interval time.Duration) *prin
 func (r *principalResolver) resolveRoles(ctx context.Context, names []string) ([]int, error) {
 	return resolveAll(ctx, names, func(name string) (int, error) {
 		return lookupByName(ctx, r.roles, "role", name,
-			func(role pangolin.Role) string { return role.Name },
+			func(role pangolin.Role, want string) bool { return role.Name == want },
 			func(role pangolin.Role) int { return role.ID })
 	})
 }
 
-// resolveClients maps client names to client IDs. A client is matched on its
-// name or its nice ID, since both are shown as identifiers in Pangolin.
+// resolveClients maps machine client references to client IDs.
+//
+// Either identifier Pangolin shows for a client is accepted, with no precedence
+// between them: a machine client is provisioned with an ID and secret, so the
+// nice ID is frequently the only identifier an operator has, while a client
+// created through the UI also carries a name. Treating the nice ID as a
+// fallback for an unnamed client -- which is what this used to do -- made it
+// work only for the clients least likely to be referenced.
+//
+// A reference matching two *different* clients across the two identifier spaces
+// stays ambiguous and is refused by lookupByName, rather than being settled by
+// preferring one identifier: either choice would silently grant a real machine
+// access that was meant for another.
 func (r *principalResolver) resolveClients(ctx context.Context, names []string) ([]int, error) {
 	return resolveAll(ctx, names, func(name string) (int, error) {
 		return lookupByName(ctx, r.clients, "client", name,
-			func(c pangolin.PangolinClient) string {
-				if c.Name != "" {
-					return c.Name
-				}
-				return c.NiceID
+			func(c pangolin.PangolinClient, want string) bool {
+				return c.Name == want || c.NiceID == want
 			},
 			func(c pangolin.PangolinClient) int { return c.ID })
 	})
@@ -89,12 +97,19 @@ func resolveAll[ID any](ctx context.Context, names []string, resolve func(string
 // miss before giving up. This is the same recovery path the domain cache uses:
 // a stale list can only cause a spurious miss, so one refetch and a retry is
 // enough to pick up an object created after this process started.
+//
+// Matching is a predicate rather than a single identifier accessor because an
+// object can carry more than one identifier an operator may reference it by --
+// a client has both a name and a nice ID. A predicate lets every identifier be
+// matched at equal precedence, so a reference that fits two distinct objects is
+// reported as the ambiguity it is instead of being resolved by identifier
+// priority.
 func lookupByName[T any, ID comparable](
 	ctx context.Context,
 	cache *lookupCache[T],
 	kind string,
 	name string,
-	nameOf func(T) string,
+	matches func(T, string) bool,
 	idOf func(T) ID,
 ) (ID, error) {
 	var zero ID
@@ -104,11 +119,11 @@ func lookupByName[T any, ID comparable](
 		return zero, err
 	}
 
-	id, matches := matchByName(entries, name, nameOf, idOf)
-	if matches > 1 {
+	id, matched := matchByName(entries, name, matches, idOf)
+	if matched > 1 {
 		return zero, fmt.Errorf("%s %q: %w", kind, name, errPrincipalAmbiguous)
 	}
-	if matches == 1 {
+	if matched == 1 {
 		return id, nil
 	}
 
@@ -117,11 +132,11 @@ func lookupByName[T any, ID comparable](
 		return zero, err
 	}
 	if didRefresh {
-		id, matches = matchByName(refreshed, name, nameOf, idOf)
-		if matches > 1 {
+		id, matched = matchByName(refreshed, name, matches, idOf)
+		if matched > 1 {
 			return zero, fmt.Errorf("%s %q: %w", kind, name, errPrincipalAmbiguous)
 		}
-		if matches == 1 {
+		if matched == 1 {
 			return id, nil
 		}
 	}
@@ -129,25 +144,31 @@ func lookupByName[T any, ID comparable](
 	return zero, fmt.Errorf("%s %q: %w", kind, name, errPrincipalNotFound)
 }
 
-// matchByName reports the identifier for name and how many entries matched, so
-// callers can distinguish "absent" from "ambiguous".
-func matchByName[T any, ID comparable](entries []T, name string, nameOf func(T) string, idOf func(T) ID) (ID, int) {
+// matchByName reports the identifier for name and how many distinct objects
+// matched, so callers can distinguish "absent" from "ambiguous".
+//
+// Matches are counted per distinct identifier, not per matching entry. One
+// client whose name and nice ID are the same string satisfies the predicate
+// once but would be indistinguishable from two colliding clients if every hit
+// were counted -- and refusing to resolve a single unambiguous object would be
+// a worse failure than the ambiguity this guards against.
+func matchByName[T any, ID comparable](entries []T, name string, matches func(T, string) bool, idOf func(T) ID) (ID, int) {
 	var found ID
-	matches := 0
+	count := 0
 
 	for _, e := range entries {
-		if nameOf(e) != name {
+		if !matches(e, name) {
 			continue
 		}
 		id := idOf(e)
-		if matches > 0 && id == found {
+		if count > 0 && id == found {
 			// The same object listed twice is not an ambiguity.
 			continue
 		}
 		found = id
-		matches++
+		count++
 	}
-	return found, matches
+	return found, count
 }
 
 // userLookup caches Pangolin's by-username lookup.

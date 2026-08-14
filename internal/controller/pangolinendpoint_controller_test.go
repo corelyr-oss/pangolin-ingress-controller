@@ -50,6 +50,12 @@ type fakePangolin struct {
 	// createUnsupported makes the create endpoint answer 404, as a Pangolin
 	// build without private resources would.
 	createUnsupported bool
+	// createDropsGrants makes create accept the principal lists, return a
+	// perfectly valid resource, and store none of them. It stands in for a
+	// server that ignores fields it advertises, which is the failure worth
+	// guarding against: one that rejected them would already surface as a
+	// failed reconcile, whereas this one looks exactly like success.
+	createDropsGrants bool
 	// deleteFails makes deletion fail, standing in for an unreachable API.
 	deleteFails bool
 	// listFails makes the listing fail, standing in for the case that must
@@ -59,11 +65,13 @@ type fakePangolin struct {
 	// resource beyond the first page is only found by following pagination.
 	pageSize int
 
-	creates  int
-	updates  int
-	deletes  int
-	lists    int
-	roleSets int
+	creates    int
+	updates    int
+	deletes    int
+	lists      int
+	roleSets   int
+	userSets   int
+	clientSets int
 
 	// lastUpdateBody is the raw update payload, for asserting on which fields
 	// were sent rather than only on what the fake chose to store.
@@ -102,8 +110,12 @@ func newFakePangolin() *fakePangolin {
 		userIDs:   map[int][]string{},
 		clientIDs: map[int][]int{},
 		roles:     []pangolin.Role{{ID: 3, Name: "developers"}},
-		clients:   []pangolin.PangolinClient{{ID: 12, Name: "vinzenz-laptop"}},
-		users:     map[string]string{"office@corelyr.com": "u-1"},
+		// The client carries both identifiers, as a real one does. A fake whose
+		// clients had names only made the nice ID path unreachable, which is
+		// how a machine client became unnameable by the identifier its
+		// credentials are issued against without any test noticing.
+		clients: []pangolin.PangolinClient{{ID: 12, NiceID: "40hf1wm4whxgx4n", Name: "vinzenz-laptop"}},
+		users:   map[string]string{"office@corelyr.com": "u-1"},
 	}
 }
 
@@ -234,9 +246,15 @@ func (f *fakePangolin) handler() http.Handler {
 				AliasAddress: fmt.Sprintf("100.96.128.%d", f.nextID%250), Status: "approved",
 			}
 			f.resources[res.ID] = res
-			f.roleIDs[res.ID] = req.RoleIDs
-			f.userIDs[res.ID] = req.UserIDs
-			f.clientIDs[res.ID] = req.ClientIDs
+			if f.createDropsGrants {
+				f.roleIDs[res.ID] = nil
+				f.userIDs[res.ID] = nil
+				f.clientIDs[res.ID] = nil
+			} else {
+				f.roleIDs[res.ID] = req.RoleIDs
+				f.userIDs[res.ID] = req.UserIDs
+				f.clientIDs[res.ID] = req.ClientIDs
+			}
 			writeData(w, res)
 
 		// GET /org/{org}/roles
@@ -375,6 +393,7 @@ func (f *fakePangolin) handleSub(w http.ResponseWriter, r *http.Request, id int,
 			UserIDs []string `json:"userIds"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.userSets++
 		f.userIDs[id] = body.UserIDs
 		writeData(w, map[string]interface{}{})
 	case "clients":
@@ -390,6 +409,7 @@ func (f *fakePangolin) handleSub(w http.ResponseWriter, r *http.Request, id int,
 			ClientIDs []int `json:"clientIds"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.clientSets++
 		f.clientIDs[id] = body.ClientIDs
 		writeData(w, map[string]interface{}{})
 	default:
@@ -1471,5 +1491,188 @@ func TestEndpoint_RecordedIdentifierSurvivesACollision(t *testing.T) {
 	assertCondition(t, got, v1alpha1.ConditionProgrammed, metav1.ConditionTrue, "")
 	if got.Status.SiteResourceID != strconv.Itoa(original.ID) {
 		t.Fatalf("status.siteResourceId = %q want %d", got.Status.SiteResourceID, original.ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Machine grants.
+//
+// Pangolin's third grant type is the machine client, and it is not reducible to
+// the other two -- a machine cannot be put into a role. Two things have to hold
+// for it to work end to end: the machine has to be nameable by the identifier
+// an operator actually holds, and a grant has to be verified on every path that
+// can create one.
+
+func TestEndpoint_MachineResolvesByNiceID(t *testing.T) {
+	ep := testEndpoint(func(ep *v1alpha1.PangolinEndpoint) {
+		// A machine client is provisioned with an ID and a secret, so its nice
+		// ID is frequently the only identifier its operator has.
+		ep.Spec.Private.Access.Clients = []string{"40hf1wm4whxgx4n"}
+	})
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatalf("a client named by its nice ID must resolve, got %v", err)
+	}
+
+	res := env.pangolin.only()
+	if res == nil {
+		got := env.get(ep)
+		c := conditionOf(t, got, v1alpha1.ConditionResolvedRefs)
+		t.Fatalf("no resource was created; ResolvedRefs=%+v", c)
+	}
+	clients, err := env.client.ListSiteResourceClients(context.Background(), strconv.Itoa(res.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clients) != 1 || clients[0] != 12 {
+		t.Fatalf("granted clients = %v want [12]", clients)
+	}
+	assertCondition(t, env.get(ep), v1alpha1.ConditionReady, metav1.ConditionTrue, "")
+}
+
+func TestEndpoint_MachineResolvesByName(t *testing.T) {
+	ep := testEndpoint(func(ep *v1alpha1.PangolinEndpoint) {
+		ep.Spec.Private.Access.Clients = []string{"vinzenz-laptop"}
+	})
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+
+	res := env.pangolin.only()
+	if res == nil {
+		t.Fatal("no resource was created")
+	}
+	clients, err := env.client.ListSiteResourceClients(context.Background(), strconv.Itoa(res.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clients) != 1 || clients[0] != 12 {
+		t.Fatalf("granted clients = %v want [12]", clients)
+	}
+}
+
+func TestEndpoint_MachineMatchingItselfTwiceIsNotAmbiguous(t *testing.T) {
+	ep := testEndpoint(func(ep *v1alpha1.PangolinEndpoint) {
+		ep.Spec.Private.Access.Clients = []string{"same"}
+	})
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	// One client whose name and nice ID are the same string satisfies both
+	// halves of the match. Counting hits rather than distinct clients would
+	// refuse to resolve a single unambiguous machine.
+	env.pangolin.mu.Lock()
+	env.pangolin.clients = []pangolin.PangolinClient{{ID: 12, NiceID: "same", Name: "same"}}
+	env.pangolin.mu.Unlock()
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatalf("one client matching on both its identifiers is not an ambiguity, got %v", err)
+	}
+	if env.pangolin.only() == nil {
+		t.Fatal("the endpoint should have been created")
+	}
+}
+
+func TestEndpoint_AmbiguousMachineIdentifierIsRefused(t *testing.T) {
+	ep := testEndpoint(func(ep *v1alpha1.PangolinEndpoint) {
+		ep.Spec.Private.Access.Clients = []string{"web"}
+	})
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	// Two different machines, one matching by name and one by nice ID. Either
+	// pick would grant a real machine access meant for another.
+	env.pangolin.mu.Lock()
+	env.pangolin.clients = []pangolin.PangolinClient{
+		{ID: 12, NiceID: "40hf1wm4whxgx4n", Name: "web"},
+		{ID: 13, NiceID: "web", Name: "build-runner"},
+	}
+	env.pangolin.mu.Unlock()
+
+	res, err := env.reconcile(ep)
+	if err != nil {
+		t.Fatalf("an ambiguous principal must not be a reconcile error, got %v", err)
+	}
+	if res.RequeueAfter == 0 {
+		t.Fatal("expected a requeue")
+	}
+	assertCondition(t, env.get(ep), v1alpha1.ConditionResolvedRefs, metav1.ConditionFalse, v1alpha1.ReasonPrincipalAmbiguous)
+	if env.pangolin.only() != nil {
+		t.Fatal("no resource may be created while a principal is unresolved")
+	}
+}
+
+func TestEndpoint_GrantDroppedAtCreateIsRepaired(t *testing.T) {
+	ep := testEndpoint() // names a role, a user and a client
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	// A server that accepts the principal lists on create and applies none of
+	// them. Nothing about the response says so, and this reconcile is the only
+	// one the endpoint gets: the reconciler filters on generation changes and
+	// does not requeue on success.
+	env.pangolin.mu.Lock()
+	env.pangolin.createDropsGrants = true
+	env.pangolin.mu.Unlock()
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+
+	res := env.pangolin.only()
+	if res == nil {
+		t.Fatal("no resource was created")
+	}
+	id := strconv.Itoa(res.ID)
+	ctx := context.Background()
+
+	clients, err := env.client.ListSiteResourceClients(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clients) != 1 || clients[0] != 12 {
+		t.Fatalf("granted clients = %v want [12]: a dropped machine grant was not repaired", clients)
+	}
+
+	users, err := env.client.ListSiteResourceUsers(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 || users[0] != "u-1" {
+		t.Fatalf("granted users = %v want [u-1]", users)
+	}
+
+	roles, err := env.client.ListSiteResourceRoles(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, role := range roles {
+		if role.ID == 3 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("granted roles = %+v want to include role 3", roles)
+	}
+}
+
+func TestEndpoint_CreateThatHonoursGrantsIssuesNoWrites(t *testing.T) {
+	ep := testEndpoint()
+	env := newTestEnv(t, testService("postgres", "data"), ep)
+
+	if _, err := env.reconcile(ep); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verifying the grant costs three reads. It must not cost a write, or the
+	// verification would be a write on the create path of every endpoint.
+	env.pangolin.mu.Lock()
+	roleSets, userSets, clientSets := env.pangolin.roleSets, env.pangolin.userSets, env.pangolin.clientSets
+	env.pangolin.mu.Unlock()
+
+	if roleSets != 0 || userSets != 0 || clientSets != 0 {
+		t.Fatalf("principal writes after a faithful create = roles %d, users %d, clients %d; want 0, 0, 0",
+			roleSets, userSets, clientSets)
 	}
 }

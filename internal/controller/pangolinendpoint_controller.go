@@ -257,7 +257,17 @@ func (r *PangolinEndpointReconciler) reconcileEndpoint(ctx context.Context, ep *
 		}
 		ep.Status.SiteResourceID = strconv.Itoa(created.ID)
 		ep.Status.AssignedAddress = created.AliasAddress
-		return nil
+
+		// The grants sent with the create are read back rather than assumed.
+		// The create response carries no principal lists, so there is nothing
+		// in it to check -- and this reconcile is the only one a stable
+		// endpoint gets: the reconciler filters on generation changes and does
+		// not requeue on success. A grant Pangolin accepted and did not apply
+		// would therefore never be repaired, and the symptom -- resource
+		// present, alias correct, client still refused -- points nowhere near
+		// the cause. When the create did apply them this costs three reads and
+		// no writes.
+		return r.reconcilePrincipals(ctx, ep.Status.SiteResourceID, roleIDs, userIDs, clientIDs)
 	}
 
 	ep.Status.SiteResourceID = strconv.Itoa(existing.ID)
