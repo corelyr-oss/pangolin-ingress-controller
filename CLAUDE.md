@@ -128,6 +128,13 @@ When changing required flags or RBAC, update **both** `deploy/deployment.yaml`/`
 
 ## Spec workflow
 
+**Every change goes through OpenSpec.** Author the change under
+`openspec/changes/<change-id>/` — `proposal.md`, `design.md`, `tasks.md` and the
+spec delta — *before* writing code, then implement against `tasks.md` and tick
+items off as they land. This applies to bug fixes as much as to features: the
+archived changes are the record of why the code looks the way it does, and a fix
+that skips the proposal leaves that record with a hole in it.
+
 This repo uses two parallel workflows; check which one a task belongs to before authoring docs:
 
 - `openspec/` — OpenSpec change proposals (active changes in `openspec/changes/`, archived in `openspec/changes/archive/`). Driven by the `openspec-*` / `opsx:*` skills.

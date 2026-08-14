@@ -108,7 +108,14 @@ type EndpointPort struct {
 // with reason NoPrincipalsGranted. It is not unreachable: Pangolin grants its
 // organisation administrator role to every private resource by itself.
 type AccessSpec struct {
-	// Clients are Pangolin client names.
+	// Clients are Pangolin mesh clients, shown as "Machines" in the Pangolin
+	// UI. Each entry is either a client's name or its nice ID; both are
+	// accepted, and a value matching two different clients is refused as
+	// ambiguous rather than resolved to one of them.
+	//
+	// A machine is granted access here and nowhere else: Pangolin does not
+	// allow a machine to be put into a role, so listing a role under Roles
+	// never grants one.
 	// +optional
 	Clients []string `json:"clients,omitempty"`
 

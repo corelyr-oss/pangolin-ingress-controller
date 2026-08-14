@@ -525,7 +525,7 @@ spec:
       - {protocol: TCP, from: 8000, to: 9000}
     access:
       roles: [developers]     # Pangolin names, not internal IDs
-      clients: [my-laptop]
+      clients: [my-laptop]    # "Machines" in the UI; a name or a nice ID
       users: [someone@example.com]
 ```
 
@@ -544,8 +544,17 @@ postgres   postgres.data.corp.internal   5432,8000-9000   True    30s
 | `enabled` | Whether Pangolin serves the endpoint. Defaults to `true` |
 | `private.alias` | The internal FQDN clients dial. Derived when unset — see below |
 | `private.ports[]` | `{protocol, port}`, `{protocol, from, to}` or `{protocol, all: true}`. Exactly one form per entry. **When omitted, the ports are taken from the backing Service** |
-| `private.access.roles/clients/users` | Pangolin principal **names**; the controller resolves them to IDs |
+| `private.access.roles/clients/users` | Pangolin principal **names**; the controller resolves them to IDs. `clients` are Pangolin's *Machines* and accept a client name **or** its nice ID (e.g. `40hf1wm4whxgx4n`) |
 | `private.disableIcmp` | Suppress ICMP to the destination |
+
+Pangolin's three grant types are independent, and a machine is not reducible to
+the other two — [it cannot be put into a role][machines], so a machine client
+reaches an endpoint only by being named under `access.clients`. An endpoint that
+names no principal at all is created and reported `Ready=False` with reason
+`NoPrincipalsGranted`; it is still reachable by organization administrators,
+through the role Pangolin grants every private resource implicitly.
+
+[machines]: https://docs.pangolin.net/manage/resources/private/authentication
 
 ### Alias derivation
 
