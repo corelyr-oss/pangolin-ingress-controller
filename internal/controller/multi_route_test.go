@@ -344,21 +344,21 @@ func getIngress(t *testing.T, c client.Client, key client.ObjectKey) *networking
 	return ing
 }
 
-// The Bifrost shape: two paths on one host, both to the same Service. Before
+// Two paths on one host, both to the same Service. Before
 // the fix each path's reconcile matched the other's target on IP and port,
 // rewrote its path, and deleted the rest -- one path routed at a time.
 func TestReconcile_OneHostTwoPaths_KeepsATargetPerPath(t *testing.T) {
 	ing := mhIngress(nil, mhRule("api.example.com",
-		mhPath("/anthropic", "bifrost", 8080),
-		mhPath("/openai", "bifrost", 8080),
+		mhPath("/v1", "backend", 8080),
+		mhPath("/v2", "backend", 8080),
 	))
-	r, _, p := newMultiRouteReconciler(t, ing, mhService("bifrost", 8080))
+	r, _, p := newMultiRouteReconciler(t, ing, mhService("backend", 8080))
 
 	reconcileTimes(t, r, client.ObjectKeyFromObject(ing), 3)
 
 	assertRoutes(t, p, map[string][]string{"api.example.com": {
-		"prefix /anthropic -> bifrost.default.svc.cluster.local:8080",
-		"prefix /openai -> bifrost.default.svc.cluster.local:8080",
+		"prefix /v1 -> backend.default.svc.cluster.local:8080",
+		"prefix /v2 -> backend.default.svc.cluster.local:8080",
 	}})
 	if p.createdTargets != 2 || p.deletedTargets != 0 {
 		t.Errorf("targets created=%d deleted=%d, want 2 and 0: repeated reconciles must not churn targets",
@@ -368,10 +368,10 @@ func TestReconcile_OneHostTwoPaths_KeepsATargetPerPath(t *testing.T) {
 
 func TestReconcile_PathRemoved_DeletesOnlyItsTarget(t *testing.T) {
 	ing := mhIngress(nil, mhRule("api.example.com",
-		mhPath("/anthropic", "bifrost", 8080),
-		mhPath("/openai", "openai-proxy", 9090),
+		mhPath("/v1", "backend", 8080),
+		mhPath("/v2", "other-backend", 9090),
 	))
-	r, c, p := newMultiRouteReconciler(t, ing, mhService("bifrost", 8080), mhService("openai-proxy", 9090))
+	r, c, p := newMultiRouteReconciler(t, ing, mhService("backend", 8080), mhService("other-backend", 9090))
 	key := client.ObjectKeyFromObject(ing)
 	reconcileTimes(t, r, key, 1)
 
@@ -383,37 +383,37 @@ func TestReconcile_PathRemoved_DeletesOnlyItsTarget(t *testing.T) {
 	reconcileTimes(t, r, key, 2)
 
 	assertRoutes(t, p, map[string][]string{"api.example.com": {
-		"prefix /anthropic -> bifrost.default.svc.cluster.local:8080",
+		"prefix /v1 -> backend.default.svc.cluster.local:8080",
 	}})
 	if p.deletedTargets != 1 {
 		t.Errorf("deleted %d targets, want exactly the removed path's", p.deletedTargets)
 	}
 }
 
-// The Coder shape: two hosts on one Ingress. Before the fix the second host
+// Two hosts on one Ingress. Before the fix the second host
 // found the first host's resource-id and renamed that resource to itself.
 func TestReconcile_TwoHosts_OneResourceEach(t *testing.T) {
 	ing := mhIngress(nil,
-		mhRule("coder.example.com", mhPath("/", "coder", 80)),
-		mhRule("apps.example.com", mhPath("/", "coder", 80)),
+		mhRule("www.example.com", mhPath("/", "web", 80)),
+		mhRule("apps.example.com", mhPath("/", "web", 80)),
 	)
-	r, c, p := newMultiRouteReconciler(t, ing, mhService("coder", 80))
+	r, c, p := newMultiRouteReconciler(t, ing, mhService("web", 80))
 	key := client.ObjectKeyFromObject(ing)
 
 	reconcileTimes(t, r, key, 3)
 
 	assertRoutes(t, p, map[string][]string{
-		"coder.example.com": {"prefix / -> coder.default.svc.cluster.local:80"},
-		"apps.example.com":  {"prefix / -> coder.default.svc.cluster.local:80"},
+		"www.example.com":  {"prefix / -> web.default.svc.cluster.local:80"},
+		"apps.example.com": {"prefix / -> web.default.svc.cluster.local:80"},
 	})
 
 	got := getIngress(t, c, key)
 	ids := readResourceIDs(got)
-	if len(ids) != 2 || ids["coder.example.com"] == ids["apps.example.com"] {
+	if len(ids) != 2 || ids["www.example.com"] == ids["apps.example.com"] {
 		t.Fatalf("resource-ids = %v, want a distinct resource per host", ids)
 	}
-	if got.Annotations[annotationResourceID] != ids["coder.example.com"] {
-		t.Errorf("resource-id = %q, want the first host's id %q", got.Annotations[annotationResourceID], ids["coder.example.com"])
+	if got.Annotations[annotationResourceID] != ids["www.example.com"] {
+		t.Errorf("resource-id = %q, want the first host's id %q", got.Annotations[annotationResourceID], ids["www.example.com"])
 	}
 	for id, res := range p.resources {
 		if want := "pangolin-controller-" + res.FullDomain; res.Name != want {
@@ -424,10 +424,10 @@ func TestReconcile_TwoHosts_OneResourceEach(t *testing.T) {
 
 func TestReconcile_HostRemoved_DeletesItsResource(t *testing.T) {
 	ing := mhIngress(nil,
-		mhRule("coder.example.com", mhPath("/", "coder", 80)),
-		mhRule("apps.example.com", mhPath("/", "coder", 80)),
+		mhRule("www.example.com", mhPath("/", "web", 80)),
+		mhRule("apps.example.com", mhPath("/", "web", 80)),
 	)
-	r, c, p := newMultiRouteReconciler(t, ing, mhService("coder", 80))
+	r, c, p := newMultiRouteReconciler(t, ing, mhService("web", 80))
 	key := client.ObjectKeyFromObject(ing)
 	reconcileTimes(t, r, key, 1)
 
@@ -439,10 +439,10 @@ func TestReconcile_HostRemoved_DeletesItsResource(t *testing.T) {
 	reconcileTimes(t, r, key, 2)
 
 	assertRoutes(t, p, map[string][]string{
-		"coder.example.com": {"prefix / -> coder.default.svc.cluster.local:80"},
+		"www.example.com": {"prefix / -> web.default.svc.cluster.local:80"},
 	})
-	if ids := readResourceIDs(getIngress(t, c, key)); len(ids) != 1 || ids["coder.example.com"] == "" {
-		t.Errorf("resource-ids = %v, want only coder.example.com", ids)
+	if ids := readResourceIDs(getIngress(t, c, key)); len(ids) != 1 || ids["www.example.com"] == "" {
+		t.Errorf("resource-ids = %v, want only www.example.com", ids)
 	}
 }
 
@@ -481,10 +481,10 @@ func TestReconcile_LegacyResourceID_AdoptedWithoutChurn(t *testing.T) {
 // own resource, the existing one staying with the host it now serves.
 func TestReconcile_LegacyClobberedMultiHost_Converges(t *testing.T) {
 	ing := mhIngress(map[string]string{annotationResourceID: "7"},
-		mhRule("coder.example.com", mhPath("/", "coder", 80)),
-		mhRule("apps.example.com", mhPath("/", "coder", 80)),
+		mhRule("www.example.com", mhPath("/", "web", 80)),
+		mhRule("apps.example.com", mhPath("/", "web", 80)),
 	)
-	r, c, p := newMultiRouteReconciler(t, ing, mhService("coder", 80))
+	r, c, p := newMultiRouteReconciler(t, ing, mhService("web", 80))
 	p.resources[7] = &pangolin.Resource{ID: 7, Name: "pangolin-controller-apps.example.com",
 		Subdomain: "apps", DomainID: "dom-1", FullDomain: "apps.example.com", HTTP: true}
 	p.nextID = 7
@@ -493,8 +493,8 @@ func TestReconcile_LegacyClobberedMultiHost_Converges(t *testing.T) {
 	reconcileTimes(t, r, key, 3)
 
 	assertRoutes(t, p, map[string][]string{
-		"coder.example.com": {"prefix / -> coder.default.svc.cluster.local:80"},
-		"apps.example.com":  {"prefix / -> coder.default.svc.cluster.local:80"},
+		"www.example.com":  {"prefix / -> web.default.svc.cluster.local:80"},
+		"apps.example.com": {"prefix / -> web.default.svc.cluster.local:80"},
 	})
 	if ids := readResourceIDs(getIngress(t, c, key)); ids["apps.example.com"] != "7" {
 		t.Errorf("resource-ids = %v, want apps.example.com to keep resource 7", ids)
@@ -503,10 +503,10 @@ func TestReconcile_LegacyClobberedMultiHost_Converges(t *testing.T) {
 
 func TestReconcile_Deletion_DeletesEveryHostsResource(t *testing.T) {
 	ing := mhIngress(nil,
-		mhRule("coder.example.com", mhPath("/", "coder", 80)),
-		mhRule("apps.example.com", mhPath("/", "coder", 80)),
+		mhRule("www.example.com", mhPath("/", "web", 80)),
+		mhRule("apps.example.com", mhPath("/", "web", 80)),
 	)
-	r, c, p := newMultiRouteReconciler(t, ing, mhService("coder", 80))
+	r, c, p := newMultiRouteReconciler(t, ing, mhService("web", 80))
 	key := client.ObjectKeyFromObject(ing)
 	reconcileTimes(t, r, key, 1)
 
