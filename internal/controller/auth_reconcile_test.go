@@ -162,7 +162,7 @@ func TestReconcileSecretBackedAuth_NoAnnotNoHash_Noop(t *testing.T) {
 	r := newTestReconciler(t, ing)
 	calls := 0
 	setFn := func(_ context.Context, _ string, _ *string) error { calls++; return nil }
-	if err := r.reconcileSecretBackedAuth(context.Background(), ing, "1",
+	if err := r.reconcileSecretBackedAuth(context.Background(), ing, []string{"1"},
 		annotationPasswordSecretRef, annotationPasswordHash, secretKeyPassword, "password", setFn); err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestReconcileSecretBackedAuth_AnnotPresent_NoHash_SetsAndWritesHash(t *test
 	r := newTestReconciler(t, ing, secret)
 	var gotValue *string
 	setFn := func(_ context.Context, _ string, v *string) error { gotValue = v; return nil }
-	if err := r.reconcileSecretBackedAuth(context.Background(), ing, "1",
+	if err := r.reconcileSecretBackedAuth(context.Background(), ing, []string{"1"},
 		annotationPasswordSecretRef, annotationPasswordHash, secretKeyPassword, "password", setFn); err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestReconcileSecretBackedAuth_MatchingHash_Noop(t *testing.T) {
 	r := newTestReconciler(t, ing, secret)
 	calls := 0
 	setFn := func(_ context.Context, _ string, _ *string) error { calls++; return nil }
-	if err := r.reconcileSecretBackedAuth(context.Background(), ing, "1",
+	if err := r.reconcileSecretBackedAuth(context.Background(), ing, []string{"1"},
 		annotationPasswordSecretRef, annotationPasswordHash, secretKeyPassword, "password", setFn); err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestReconcileSecretBackedAuth_StaleHash_Resets(t *testing.T) {
 		}
 		return nil
 	}
-	if err := r.reconcileSecretBackedAuth(context.Background(), ing, "1",
+	if err := r.reconcileSecretBackedAuth(context.Background(), ing, []string{"1"},
 		annotationPasswordSecretRef, annotationPasswordHash, secretKeyPassword, "password", setFn); err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestReconcileSecretBackedAuth_AnnotRemoved_HashPresent_Clears(t *testing.T)
 		clearedWith = v
 		return nil
 	}
-	if err := r.reconcileSecretBackedAuth(context.Background(), ing, "1",
+	if err := r.reconcileSecretBackedAuth(context.Background(), ing, []string{"1"},
 		annotationPasswordSecretRef, annotationPasswordHash, secretKeyPassword, "password", setFn); err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestReconcileSecretBackedAuth_SecretMissing(t *testing.T) {
 		t.Fatal("set should not be called when secret missing")
 		return nil
 	}
-	err := r.reconcileSecretBackedAuth(context.Background(), ing, "1",
+	err := r.reconcileSecretBackedAuth(context.Background(), ing, []string{"1"},
 		annotationPasswordSecretRef, annotationPasswordHash, secretKeyPassword, "password", setFn)
 	if !errors.Is(err, errSecretNotFound) {
 		t.Fatalf("expected errSecretNotFound, got %v", err)
@@ -293,7 +293,7 @@ func TestReconcileSecretBackedAuth_SecretKeyMissing(t *testing.T) {
 		t.Fatal("set should not be called when secret key missing")
 		return nil
 	}
-	err := r.reconcileSecretBackedAuth(context.Background(), ing, "1",
+	err := r.reconcileSecretBackedAuth(context.Background(), ing, []string{"1"},
 		annotationPasswordSecretRef, annotationPasswordHash, secretKeyPassword, "password", setFn)
 	if !errors.Is(err, errSecretKeyMissing) {
 		t.Fatalf("expected errSecretKeyMissing, got %v", err)
@@ -310,7 +310,7 @@ func TestReconcileSecretBackedAuth_NotImplemented_Tolerated(t *testing.T) {
 	setFn := func(_ context.Context, _ string, _ *string) error {
 		return &pangolin.NotImplementedError{Message: "404"}
 	}
-	if err := r.reconcileSecretBackedAuth(context.Background(), ing, "1",
+	if err := r.reconcileSecretBackedAuth(context.Background(), ing, []string{"1"},
 		annotationPasswordSecretRef, annotationPasswordHash, secretKeyPassword, "password", setFn); err != nil {
 		t.Fatalf("404 should be tolerated, got %v", err)
 	}

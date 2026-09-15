@@ -350,7 +350,10 @@ These annotations are written by the controller and MUST NOT be edited by users 
 
 | Annotation | Type | Description |
 |------------|------|-------------|
-| `pangolin.ingress.k8s.io/resource-id` | `string` | Automatically set by the controller to track the Pangolin resource ID |
+| `pangolin.ingress.k8s.io/resource-ids` | `JSON` | Automatically set by the controller: a map from each host on the Ingress to its Pangolin resource ID. An Ingress owns one resource per host |
+| `pangolin.ingress.k8s.io/resource-id` | `string` | Automatically set by the controller to the first host's resource ID, kept for status and for older controller versions. Adopted on upgrade from Ingresses programmed before `resource-ids` existed |
+
+Each host gets one Pangolin resource, and each path under it one target, routed by Pangolin as `Host() && Path()/PathPrefix()`. Several hosts or several paths on one Ingress are supported; removing a host from the Ingress deletes its resource, and removing a path deletes its target.
 
 ### Example: Disable SSO
 

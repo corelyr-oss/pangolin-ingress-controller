@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,12 @@ import (
 const (
 	pangolinFinalizerName = "pangolin.ingress.k8s.io/finalizer"
 	annotationResourceID  = "pangolin.ingress.k8s.io/resource-id"
+	// annotationResourceIDs maps each host on the Ingress to its Pangolin
+	// resource id, as a JSON object. An Ingress with several hosts owns one
+	// resource per host, which the single resource-id cannot record. resource-id
+	// is still written, holding the first host's id, so status and a controller
+	// rolled back to an older image keep working.
+	annotationResourceIDs = "pangolin.ingress.k8s.io/resource-ids"
 
 	// SSO / access control annotations
 	annotationSSO                   = "pangolin.ingress.k8s.io/sso"
@@ -86,6 +93,7 @@ const (
 // will spin in a write-watch loop.
 var controllerManagedAnnotations = map[string]struct{}{
 	annotationResourceID:   {},
+	annotationResourceIDs:  {},
 	annotationPasswordHash: {},
 	annotationPincodeHash:  {},
 }
@@ -248,68 +256,205 @@ func (r *IngressReconciler) isManaged(ingress *networkingv1.Ingress) bool {
 	return false
 }
 
-// processIngressRules processes the rules in the ingress specification and creates Pangolin resources
+// hostPaths is one host on an Ingress with every path declared for it. Rules
+// naming the same host are merged: Pangolin keys a resource by its domain, so
+// they are one resource either way.
+type hostPaths struct {
+	host  string
+	paths []networkingv1.HTTPIngressPath
+}
+
+// desiredTarget is one Ingress path resolved to the Service port it routes to.
+type desiredTarget struct {
+	service string
+	port    int32
+	path    networkingv1.HTTPIngressPath
+}
+
+// groupPathsByHost returns the Ingress's hosts in the order they first appear,
+// each with its paths. Rules without a host or without paths are skipped.
+func groupPathsByHost(ingress *networkingv1.Ingress) []hostPaths {
+	var out []hostPaths
+	index := map[string]int{}
+	for _, rule := range ingress.Spec.Rules {
+		if rule.Host == "" || rule.HTTP == nil || len(rule.HTTP.Paths) == 0 {
+			continue
+		}
+		i, seen := index[rule.Host]
+		if !seen {
+			i = len(out)
+			index[rule.Host] = i
+			out = append(out, hostPaths{host: rule.Host})
+		}
+		out[i].paths = append(out[i].paths, rule.HTTP.Paths...)
+	}
+	return out
+}
+
+// processIngressRules programs one Pangolin resource per host on the Ingress,
+// with one target per path, and deletes the resources of hosts the Ingress no
+// longer declares.
+//
+// It works host by host, not path by path. Reconciling each path on its own is
+// what broke multi-host and multi-path Ingresses: every path wrote the single
+// resource-id annotation and pruned every target but its own, so the last path
+// reconciled was the only one left routing.
 func (r *IngressReconciler) processIngressRules(ctx context.Context, ingress *networkingv1.Ingress) error {
 	log := log.FromContext(ctx)
 
-	// Process each rule and create Pangolin resources
-	for _, rule := range ingress.Spec.Rules {
-		host := rule.Host
-		if host == "" {
-			log.Info("Skipping rule without host")
-			continue
-		}
+	hosts := groupPathsByHost(ingress)
+	ids := readResourceIDs(ingress)
 
-		if rule.HTTP != nil {
-			for _, path := range rule.HTTP.Paths {
-				// Get the backend service
-				serviceName := path.Backend.Service.Name
-				service := &corev1.Service{}
-				err := r.Get(ctx, types.NamespacedName{
-					Name:      serviceName,
-					Namespace: ingress.Namespace,
-				}, service)
-				if err != nil {
-					log.Error(err, "Failed to get backend service", "service", serviceName)
-					return err
-				}
+	for _, hp := range hosts {
+		targets := make([]desiredTarget, 0, len(hp.paths))
+		for _, path := range hp.paths {
+			// Get the backend service
+			serviceName := path.Backend.Service.Name
+			service := &corev1.Service{}
+			err := r.Get(ctx, types.NamespacedName{
+				Name:      serviceName,
+				Namespace: ingress.Namespace,
+			}, service)
+			if err != nil {
+				log.Error(err, "Failed to get backend service", "service", serviceName)
+				return err
+			}
 
-				// Determine service port
-				var servicePort int32
-				if path.Backend.Service.Port.Number != 0 {
-					servicePort = path.Backend.Service.Port.Number
-				} else {
-					// Find port by name
-					for _, port := range service.Spec.Ports {
-						if port.Name == path.Backend.Service.Port.Name {
-							servicePort = port.Port
-							break
-						}
+			// Determine service port
+			var servicePort int32
+			if path.Backend.Service.Port.Number != 0 {
+				servicePort = path.Backend.Service.Port.Number
+			} else {
+				// Find port by name
+				for _, port := range service.Spec.Ports {
+					if port.Name == path.Backend.Service.Port.Name {
+						servicePort = port.Port
+						break
 					}
 				}
-
-				if servicePort == 0 {
-					return fmt.Errorf("could not determine service port for service %s", serviceName)
-				}
-
-				log.Info("Processing ingress rule",
-					"host", host,
-					"path", path.Path,
-					"pathType", *path.PathType,
-					"service", serviceName,
-					"servicePort", servicePort,
-				)
-
-				// Create or update Pangolin resource
-				if err := r.createOrUpdatePangolinResource(ctx, ingress, host, path, serviceName, servicePort); err != nil {
-					log.Error(err, "Failed to create/update Pangolin resource")
-					return err
-				}
 			}
+
+			if servicePort == 0 {
+				return fmt.Errorf("could not determine service port for service %s", serviceName)
+			}
+
+			log.Info("Processing ingress rule",
+				"host", hp.host,
+				"path", path.Path,
+				"pathType", *path.PathType,
+				"service", serviceName,
+				"servicePort", servicePort,
+			)
+
+			targets = append(targets, desiredTarget{service: serviceName, port: servicePort, path: path})
+		}
+
+		if err := r.reconcileHost(ctx, ingress, hp.host, targets, ids, len(hosts)); err != nil {
+			log.Error(err, "Failed to create/update Pangolin resource", "host", hp.host)
+			return err
 		}
 	}
 
-	return nil
+	if err := r.pruneRemovedHosts(ctx, ingress, ids, hosts); err != nil {
+		return err
+	}
+
+	// Auth runs once over every resource the Ingress owns rather than per host:
+	// the password and pincode hashes are one annotation each, and per-host
+	// passes would each overwrite the previous host's hash.
+	return r.reconcileResourceAuth(ctx, ingress, sortedResourceIDs(ids))
+}
+
+// readResourceIDs returns the host -> Pangolin resource id map recorded on the
+// Ingress. A missing or malformed annotation yields an empty map, which
+// reconciles as if the resources were new: creation conflicts on the existing
+// domain and adopts the resource that holds it.
+func readResourceIDs(ingress *networkingv1.Ingress) map[string]string {
+	raw := ingress.Annotations[annotationResourceIDs]
+	if raw == "" {
+		return map[string]string{}
+	}
+	ids := map[string]string{}
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		return map[string]string{}
+	}
+	return ids
+}
+
+// storeResourceIDs records ids on the Ingress, together with the first host's
+// id in the legacy resource-id annotation, and persists the Ingress only when
+// either annotation changed.
+func (r *IngressReconciler) storeResourceIDs(ctx context.Context, ingress *networkingv1.Ingress, ids map[string]string) error {
+	if ingress.Annotations == nil {
+		ingress.Annotations = map[string]string{}
+	}
+
+	encoded := ""
+	if len(ids) > 0 {
+		// Map keys marshal in sorted order, so equal maps encode identically.
+		raw, err := json.Marshal(ids)
+		if err != nil {
+			return fmt.Errorf("failed to encode resource ids: %w", err)
+		}
+		encoded = string(raw)
+	}
+
+	legacy := ""
+	for _, hp := range groupPathsByHost(ingress) {
+		if id := ids[hp.host]; id != "" {
+			legacy = id
+			break
+		}
+	}
+
+	changed := setOrDeleteAnnotation(ingress, annotationResourceIDs, encoded)
+	if setOrDeleteAnnotation(ingress, annotationResourceID, legacy) {
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return r.Update(ctx, ingress)
+}
+
+// setOrDeleteAnnotation sets key to value, or removes it when value is empty,
+// and reports whether the annotations changed.
+func setOrDeleteAnnotation(ingress *networkingv1.Ingress, key, value string) bool {
+	current, present := ingress.Annotations[key]
+	if value == "" {
+		if !present {
+			return false
+		}
+		delete(ingress.Annotations, key)
+		return true
+	}
+	if present && current == value {
+		return false
+	}
+	ingress.Annotations[key] = value
+	return true
+}
+
+// sortedResourceIDs returns the distinct resource ids in ids, sorted.
+func sortedResourceIDs(ids map[string]string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// hasResourceID reports whether any host in ids maps to id.
+func hasResourceID(ids map[string]string, id string) bool {
+	for _, v := range ids {
+		if v == id {
+			return true
+		}
+	}
+	return false
 }
 
 // updateIngressStatus updates the status of the ingress with load balancer information
@@ -425,8 +570,41 @@ func (r *IngressReconciler) domainRequeueAfter() time.Duration {
 	return interval + interval/10
 }
 
-// createOrUpdatePangolinResource creates or updates a Pangolin resource for an ingress rule
-func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, ingress *networkingv1.Ingress, host string, path networkingv1.HTTPIngressPath, serviceName string, servicePort int32) error {
+// resourceIDForHost returns the id of host's Pangolin resource, or "" when it
+// has none yet.
+//
+// Ingresses programmed before resource-ids existed carry only resource-id. On a
+// single-host Ingress that id is the host's resource -- the only shape
+// resource-id ever worked for -- and it is adopted as is. With several hosts it
+// belongs to whichever host reconciled last, so only the host Pangolin says it
+// serves adopts it; the others fall through to creation, which conflicts on
+// their domain and adopts the resource that already holds it.
+func (r *IngressReconciler) resourceIDForHost(ctx context.Context, ingress *networkingv1.Ingress, host string, ids map[string]string, hostCount int) string {
+	if id := ids[host]; id != "" {
+		return id
+	}
+	legacy := ingress.Annotations[annotationResourceID]
+	if legacy == "" || hasResourceID(ids, legacy) {
+		return ""
+	}
+	if hostCount == 1 {
+		return legacy
+	}
+	resource, err := r.PangolinClient.GetResource(ctx, legacy)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "Failed to look up legacy Pangolin resource; treating host as new",
+			"resourceID", legacy, "host", host)
+		return ""
+	}
+	if resource.FullDomain != host {
+		return ""
+	}
+	return legacy
+}
+
+// reconcileHost brings host's Pangolin resource in line with the Ingress: the
+// resource and its settings, then one target per declared path.
+func (r *IngressReconciler) reconcileHost(ctx context.Context, ingress *networkingv1.Ingress, host string, targets []desiredTarget, ids map[string]string, hostCount int) error {
 	log := log.FromContext(ctx)
 
 	// Resolve host against known Pangolin domains
@@ -443,8 +621,7 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 	}
 	resourceName := fmt.Sprintf("%s-%s", prefix, host)
 
-	// Check if resource already exists (stored in annotation)
-	resourceID := ingress.Annotations[annotationResourceID]
+	resourceID := r.resourceIDForHost(ctx, ingress, host, ids, hostCount)
 
 	// Parse annotations for proxy and access control settings
 	annotations := ingress.Annotations
@@ -483,18 +660,22 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		SkipToIdpID:           parseIntAnnotation(annotations, annotationSkipToIdpID),
 	}
 
-	var resource *pangolin.Resource
-
 	if resourceID != "" {
-		resource, err = r.PangolinClient.UpdateResource(ctx, resourceID, updateReq)
-		if err != nil {
+		if _, err := r.PangolinClient.UpdateResource(ctx, resourceID, updateReq); err != nil {
 			log.Error(err, "Failed to update Pangolin resource", "resourceID", resourceID, "subdomain", subdomain, "domainID", domainID, "host", host)
 			return fmt.Errorf("failed to update Pangolin resource %s: %w", resourceID, err)
 		}
 		log.Info("Updated Pangolin resource", "resourceID", resourceID, "name", resourceName)
+
+		if ids[host] != resourceID {
+			ids[host] = resourceID
+			if err := r.storeResourceIDs(ctx, ingress, ids); err != nil {
+				return err
+			}
+		}
 	} else {
 		// Create new resource
-		resource, err = r.PangolinClient.CreateResource(ctx, resourceReq)
+		resource, err := r.PangolinClient.CreateResource(ctx, resourceReq)
 		if err != nil {
 			if pangolin.IsConflict(err) {
 				// Resource already exists in Pangolin — adopt it
@@ -512,35 +693,35 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 			log.Info("Created Pangolin resource", "resourceID", resource.ID, "name", resourceName)
 		}
 
-		// Store resource ID in annotation
-		if ingress.Annotations == nil {
-			ingress.Annotations = make(map[string]string)
-		}
+		// Record the resource ID before applying settings, so a failure below
+		// does not leave a resource the next reconcile cannot find.
 		resourceID = strconv.Itoa(resource.ID)
-		ingress.Annotations[annotationResourceID] = resourceID
-		if err := r.Update(ctx, ingress); err != nil {
+		ids[host] = resourceID
+		if err := r.storeResourceIDs(ctx, ingress, ids); err != nil {
 			return err
 		}
 
 		// Apply update settings (SSO, SSL, etc.) to the resource
-		resource, err = r.PangolinClient.UpdateResource(ctx, resourceID, updateReq)
-		if err != nil {
+		if _, err := r.PangolinClient.UpdateResource(ctx, resourceID, updateReq); err != nil {
 			log.Error(err, "Failed to apply settings to Pangolin resource", "resourceID", resourceID)
 			return fmt.Errorf("failed to apply settings to Pangolin resource %s: %w", resourceID, err)
 		}
 	}
 
+	return r.reconcileTargets(ctx, ingress, resourceID, targets)
+}
+
+// reconcileTargets gives the resource exactly one target per desired path and
+// deletes every other target on it. A target is matched on site, backend, path
+// and match type, so two paths to the same Service are two targets rather than
+// one target that each path's reconcile rewrites.
+func (r *IngressReconciler) reconcileTargets(ctx context.Context, ingress *networkingv1.Ingress, resourceID string, targets []desiredTarget) error {
+	log := log.FromContext(ctx)
+
 	site, err := r.getSiteInfo(ctx)
 	if err != nil {
 		log.Error(err, "Failed to resolve site for target creation", "siteNiceID", r.SiteNiceID)
 		return err
-	}
-
-	targetIP := fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, ingress.Namespace)
-	targetPort := int(servicePort)
-	targetPath := path.Path
-	if targetPath == "" {
-		targetPath = "/"
 	}
 
 	// Check for existing targets to avoid duplicates on restarts
@@ -550,24 +731,79 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		return fmt.Errorf("failed to list targets for resource %s: %w", resourceID, err)
 	}
 
-	// Look for a target that matches our site, IP, and port
-	var existingTarget *pangolin.Target
-	for i := range existingTargets {
-		t := &existingTargets[i]
-		if t.SiteID == site.ID && t.IP == targetIP && t.Port == targetPort {
-			existingTarget = t
-			break
+	active := make(map[int]struct{}, len(targets))
+	for _, desired := range targets {
+		targetReq := buildTargetRequest(ingress, site.ID, desired)
+
+		var existingTarget *pangolin.Target
+		for i := range existingTargets {
+			t := &existingTargets[i]
+			if _, claimed := active[t.ID]; claimed {
+				continue
+			}
+			if targetMatches(t, targetReq) {
+				existingTarget = t
+				break
+			}
+		}
+
+		if existingTarget != nil {
+			// Target already exists — update it instead of creating a duplicate
+			targetIDStr := strconv.Itoa(existingTarget.ID)
+			if _, err := r.PangolinClient.UpdateTarget(ctx, targetIDStr, targetReq); err != nil {
+				log.Error(err, "Failed to update Pangolin target", "targetID", targetIDStr, "resourceID", resourceID)
+				return fmt.Errorf("failed to update Pangolin target %s: %w", targetIDStr, err)
+			}
+			active[existingTarget.ID] = struct{}{}
+			log.Info("Updated existing Pangolin target", "targetID", targetIDStr, "service", desired.service, "port", desired.port, "path", targetReq.Path)
+			continue
+		}
+
+		// No matching target — create a new one
+		newTarget, err := r.PangolinClient.CreateTarget(ctx, resourceID, targetReq)
+		if err != nil {
+			log.Error(err, "Failed to create Pangolin target", "resourceID", resourceID, "service", desired.service, "port", desired.port, "path", targetReq.Path)
+			return fmt.Errorf("failed to create Pangolin target for service %s:%d path %s: %w", desired.service, desired.port, targetReq.Path, err)
+		}
+		active[newTarget.ID] = struct{}{}
+		log.Info("Created Pangolin target", "targetID", newTarget.ID, "service", desired.service, "port", desired.port, "path", targetReq.Path)
+	}
+
+	// Clean up targets that no path on the Ingress declares any more
+	for _, t := range existingTargets {
+		if _, ok := active[t.ID]; ok {
+			continue
+		}
+		staleID := strconv.Itoa(t.ID)
+		if delErr := r.PangolinClient.DeleteTarget(ctx, staleID); delErr != nil {
+			log.Error(delErr, "Failed to delete stale Pangolin target", "targetID", staleID)
+		} else {
+			log.Info("Deleted stale Pangolin target", "targetID", staleID, "ip", t.IP, "port", t.Port, "path", t.Path)
 		}
 	}
 
+	return nil
+}
+
+// buildTargetRequest describes the Pangolin target for one Ingress path,
+// including the health check settings from the Ingress annotations.
+func buildTargetRequest(ingress *networkingv1.Ingress, siteID int, desired desiredTarget) *pangolin.CreateTargetRequest {
+	annotations := ingress.Annotations
+	targetIP := fmt.Sprintf("%s.%s.svc.cluster.local", desired.service, ingress.Namespace)
+	targetPort := int(desired.port)
+	targetPath := desired.path.Path
+	if targetPath == "" {
+		targetPath = "/"
+	}
+
 	targetReq := &pangolin.CreateTargetRequest{
-		SiteID:              site.ID,
+		SiteID:              siteID,
 		IP:                  targetIP,
 		Method:              "http",
 		Port:                targetPort,
 		Enabled:             true,
 		Path:                targetPath,
-		PathMatchType:       pathTypeToMatch(path.PathType),
+		PathMatchType:       pathTypeToMatch(desired.path.PathType),
 		HCEnabled:           parseBoolAnnotation(annotations, annotationHCEnabled),
 		HCPath:              parseStringAnnotation(annotations, annotationHCPath),
 		HCScheme:            parseStringAnnotation(annotations, annotationHCScheme),
@@ -596,7 +832,7 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 			targetReq.HCHostname = &targetIP
 		}
 		if targetReq.HCPort == nil {
-			p := int(servicePort)
+			p := targetPort
 			targetReq.HCPort = &p
 		}
 		if targetReq.HCInterval == nil {
@@ -609,46 +845,65 @@ func (r *IngressReconciler) createOrUpdatePangolinResource(ctx context.Context, 
 		}
 	}
 
-	var activeTargetID int
-	if existingTarget != nil {
-		// Target already exists — update it instead of creating a duplicate
-		targetIDStr := strconv.Itoa(existingTarget.ID)
-		_, err = r.PangolinClient.UpdateTarget(ctx, targetIDStr, targetReq)
-		if err != nil {
-			log.Error(err, "Failed to update Pangolin target", "targetID", targetIDStr, "resourceID", resourceID)
-			return fmt.Errorf("failed to update Pangolin target %s: %w", targetIDStr, err)
-		}
-		activeTargetID = existingTarget.ID
-		log.Info("Updated existing Pangolin target", "targetID", targetIDStr, "service", serviceName, "port", servicePort)
-	} else {
-		// No matching target — create a new one
-		newTarget, createErr := r.PangolinClient.CreateTarget(ctx, resourceID, targetReq)
-		if createErr != nil {
-			log.Error(createErr, "Failed to create Pangolin target", "resourceID", resourceID, "service", serviceName, "port", servicePort)
-			return fmt.Errorf("failed to create Pangolin target for service %s:%d: %w", serviceName, servicePort, createErr)
-		}
-		activeTargetID = newTarget.ID
-		log.Info("Created Pangolin target", "targetID", newTarget.ID, "service", serviceName, "port", servicePort)
+	return targetReq
+}
+
+// targetMatches reports whether an existing target is the one req describes. A
+// target recorded without a path routes the whole host, which is what "/" as a
+// prefix means, so it matches that path instead of being replaced by an
+// equivalent target.
+func targetMatches(t *pangolin.Target, req *pangolin.CreateTargetRequest) bool {
+	path, matchType := t.Path, t.PathMatchType
+	if path == "" {
+		path = "/"
+	}
+	if matchType == "" {
+		matchType = "prefix"
+	}
+	return t.SiteID == req.SiteID && t.IP == req.IP && t.Port == req.Port &&
+		path == req.Path && matchType == req.PathMatchType
+}
+
+// pruneRemovedHosts deletes the Pangolin resource of every recorded host the
+// Ingress no longer declares, so a renamed or removed host stops routing
+// instead of lingering in Pangolin.
+func (r *IngressReconciler) pruneRemovedHosts(ctx context.Context, ingress *networkingv1.Ingress, ids map[string]string, hosts []hostPaths) error {
+	log := log.FromContext(ctx)
+
+	declared := make(map[string]string, len(hosts))
+	for _, hp := range hosts {
+		declared[hp.host] = ids[hp.host]
 	}
 
-	// Clean up stale targets that don't match the active one
-	for _, t := range existingTargets {
-		if t.ID == activeTargetID {
+	pruned := false
+	for host, id := range ids {
+		if _, ok := declared[host]; ok {
 			continue
 		}
-		staleID := strconv.Itoa(t.ID)
-		if delErr := r.PangolinClient.DeleteTarget(ctx, staleID); delErr != nil {
-			log.Error(delErr, "Failed to delete stale Pangolin target", "targetID", staleID)
+		if hasResourceID(declared, id) {
+			// Still serving a declared host; only the stale entry goes.
+			log.Info("Dropping stale resource-ids entry that shares a resource with a declared host", "host", host, "resourceID", id)
 		} else {
-			log.Info("Deleted stale Pangolin target", "targetID", staleID, "ip", t.IP, "port", t.Port)
+			if err := r.deleteResource(ctx, id); err != nil {
+				return fmt.Errorf("failed to delete Pangolin resource %s of removed host %s: %w", id, host, err)
+			}
+			log.Info("Deleted Pangolin resource of a host the Ingress no longer declares", "host", host, "resourceID", id)
 		}
+		delete(ids, host)
+		pruned = true
 	}
+	if !pruned {
+		return nil
+	}
+	return r.storeResourceIDs(ctx, ingress, ids)
+}
 
-	// Reconcile per-resource auth methods (password, pincode, whitelist, roles, users).
-	if err := r.reconcileResourceAuth(ctx, ingress, resourceID); err != nil {
+// deleteResource deletes a Pangolin resource, counting one that is already gone
+// as deleted so a retry after a partial failure can finish.
+func (r *IngressReconciler) deleteResource(ctx context.Context, resourceID string) error {
+	if err := r.PangolinClient.DeleteResource(ctx, resourceID); err != nil && !pangolin.IsNotFound(err) {
 		return err
 	}
-
 	return nil
 }
 
@@ -670,11 +925,12 @@ func (r *IngressReconciler) getSecretValue(ctx context.Context, namespace, name,
 	return string(v), nil
 }
 
-// hashSecretValue computes a stable change-detection hash over the resource ID
-// (acts as a per-resource salt) and the secret value. Not intended as a
-// password hash for security — just to detect when the user changed the value.
-func hashSecretValue(resourceID, value string) string {
-	h := sha256.Sum256([]byte(resourceID + ":" + value))
+// hashSecretValue computes a stable change-detection hash over the resource IDs
+// (comma-joined, acting as a per-Ingress salt; a single resource's ID alone) and
+// the secret value. Not intended as a password hash for security — just to
+// detect when the user changed the value or the resources it applies to.
+func hashSecretValue(resourceIDs, value string) string {
+	h := sha256.Sum256([]byte(resourceIDs + ":" + value))
 	return hex.EncodeToString(h[:])
 }
 
@@ -703,42 +959,45 @@ func (r *IngressReconciler) clearManagedAnnotation(ctx context.Context, ingress 
 
 // reconcileResourceAuth reconciles the per-resource auth methods that live on
 // separate Pangolin endpoints (password, pincode, email whitelist, role
-// assignments, user assignments). 404/405 from any sub-endpoint is logged and
-// the sub-step is skipped — older Pangolin instances may not have the route.
-func (r *IngressReconciler) reconcileResourceAuth(ctx context.Context, ingress *networkingv1.Ingress, resourceID string) error {
-	if resourceID == "" {
+// assignments, user assignments) on every resource the Ingress owns. 404/405
+// from any sub-endpoint is logged and the sub-step is skipped — older Pangolin
+// instances may not have the route.
+func (r *IngressReconciler) reconcileResourceAuth(ctx context.Context, ingress *networkingv1.Ingress, resourceIDs []string) error {
+	if len(resourceIDs) == 0 {
 		return nil
 	}
-	if err := r.reconcilePassword(ctx, ingress, resourceID); err != nil {
+	if err := r.reconcilePassword(ctx, ingress, resourceIDs); err != nil {
 		return err
 	}
-	if err := r.reconcilePincode(ctx, ingress, resourceID); err != nil {
+	if err := r.reconcilePincode(ctx, ingress, resourceIDs); err != nil {
 		return err
 	}
-	if err := r.reconcileWhitelist(ctx, ingress, resourceID); err != nil {
-		return err
-	}
-	if err := r.reconcileRoles(ctx, ingress, resourceID); err != nil {
-		return err
-	}
-	if err := r.reconcileUsers(ctx, ingress, resourceID); err != nil {
-		return err
+	for _, resourceID := range resourceIDs {
+		if err := r.reconcileWhitelist(ctx, ingress, resourceID); err != nil {
+			return err
+		}
+		if err := r.reconcileRoles(ctx, ingress, resourceID); err != nil {
+			return err
+		}
+		if err := r.reconcileUsers(ctx, ingress, resourceID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (r *IngressReconciler) reconcilePassword(ctx context.Context, ingress *networkingv1.Ingress, resourceID string) error {
+func (r *IngressReconciler) reconcilePassword(ctx context.Context, ingress *networkingv1.Ingress, resourceIDs []string) error {
 	return r.reconcileSecretBackedAuth(
-		ctx, ingress, resourceID,
+		ctx, ingress, resourceIDs,
 		annotationPasswordSecretRef, annotationPasswordHash, secretKeyPassword,
 		"password",
 		r.PangolinClient.SetResourcePassword,
 	)
 }
 
-func (r *IngressReconciler) reconcilePincode(ctx context.Context, ingress *networkingv1.Ingress, resourceID string) error {
+func (r *IngressReconciler) reconcilePincode(ctx context.Context, ingress *networkingv1.Ingress, resourceIDs []string) error {
 	return r.reconcileSecretBackedAuth(
-		ctx, ingress, resourceID,
+		ctx, ingress, resourceIDs,
 		annotationPincodeSecretRef, annotationPincodeHash, secretKeyPincode,
 		"pincode",
 		r.PangolinClient.SetResourcePincode,
@@ -748,15 +1007,20 @@ func (r *IngressReconciler) reconcilePincode(ctx context.Context, ingress *netwo
 // reconcileSecretBackedAuth implements the convergent state machine shared by
 // password and pincode: annotation absent + hash absent → no-op; annotation
 // present + hash matches → no-op; annotation present + hash stale or absent →
-// set + write hash; annotation absent + hash present → clear + remove hash.
+// set on every resource + write hash; annotation absent + hash present → clear
+// on every resource + remove hash.
+//
+// The hash is one annotation for the whole Ingress, so it covers the set of
+// resources as well as the value: adding a host changes it, and the new host's
+// resource gets the password too.
 func (r *IngressReconciler) reconcileSecretBackedAuth(
 	ctx context.Context,
 	ingress *networkingv1.Ingress,
-	resourceID string,
+	resourceIDs []string,
 	refAnnotation, hashAnnotation, secretKey, label string,
 	setFn func(context.Context, string, *string) error,
 ) error {
-	log := log.FromContext(ctx).WithValues("authMethod", label, "resourceID", resourceID)
+	log := log.FromContext(ctx).WithValues("authMethod", label, "resourceIDs", resourceIDs)
 	annotations := ingress.Annotations
 	refValue := annotations[refAnnotation]
 	storedHash := annotations[hashAnnotation]
@@ -765,12 +1029,14 @@ func (r *IngressReconciler) reconcileSecretBackedAuth(
 		if storedHash == "" {
 			return nil
 		}
-		if err := setFn(ctx, resourceID, nil); err != nil {
-			if pangolin.IsNotImplemented(err) {
-				log.Info("Pangolin endpoint not available; skipping clear", "error", err)
-				return nil
+		for _, resourceID := range resourceIDs {
+			if err := setFn(ctx, resourceID, nil); err != nil {
+				if pangolin.IsNotImplemented(err) {
+					log.Info("Pangolin endpoint not available; skipping clear", "error", err)
+					return nil
+				}
+				return fmt.Errorf("failed to clear %s on resource %s: %w", label, resourceID, err)
 			}
-			return fmt.Errorf("failed to clear %s: %w", label, err)
 		}
 		log.Info("Cleared resource " + label)
 		return r.clearManagedAnnotation(ctx, ingress, hashAnnotation)
@@ -784,16 +1050,18 @@ func (r *IngressReconciler) reconcileSecretBackedAuth(
 	if err != nil {
 		return err
 	}
-	desiredHash := hashSecretValue(resourceID, value)
+	desiredHash := hashSecretValue(strings.Join(resourceIDs, ","), value)
 	if desiredHash == storedHash {
 		return nil
 	}
-	if err := setFn(ctx, resourceID, &value); err != nil {
-		if pangolin.IsNotImplemented(err) {
-			log.Info("Pangolin endpoint not available; skipping set", "error", err)
-			return nil
+	for _, resourceID := range resourceIDs {
+		if err := setFn(ctx, resourceID, &value); err != nil {
+			if pangolin.IsNotImplemented(err) {
+				log.Info("Pangolin endpoint not available; skipping set", "error", err)
+				return nil
+			}
+			return fmt.Errorf("failed to set %s on resource %s: %w", label, resourceID, err)
 		}
-		return fmt.Errorf("failed to set %s: %w", label, err)
 	}
 	log.Info("Set resource " + label)
 	return r.setManagedAnnotation(ctx, ingress, hashAnnotation, desiredHash)
@@ -941,23 +1209,29 @@ func (r *IngressReconciler) findExistingResource(ctx context.Context, subdomain,
 	return nil, fmt.Errorf("could not find existing resource with subdomain %q and domainID %q", subdomain, domainID)
 }
 
-// deletePangolinResources deletes all Pangolin resources associated with an ingress
+// deletePangolinResources deletes every Pangolin resource the Ingress owns: one
+// per recorded host, plus a legacy resource-id that no host has claimed.
 func (r *IngressReconciler) deletePangolinResources(ctx context.Context, ingress *networkingv1.Ingress) error {
 	log := log.FromContext(ctx)
 
-	resourceID := ingress.Annotations[annotationResourceID]
-	if resourceID == "" {
+	resourceIDs := sortedResourceIDs(readResourceIDs(ingress))
+	if legacy := ingress.Annotations[annotationResourceID]; legacy != "" && !slices.Contains(resourceIDs, legacy) {
+		resourceIDs = append(resourceIDs, legacy)
+	}
+	if len(resourceIDs) == 0 {
 		log.Info("No Pangolin resource ID found, skipping deletion")
 		return nil
 	}
 
-	// Delete the resource (targets will be deleted automatically)
-	if err := r.PangolinClient.DeleteResource(ctx, resourceID); err != nil {
-		log.Error(err, "Failed to delete Pangolin resource", "resourceID", resourceID)
-		return err
+	for _, resourceID := range resourceIDs {
+		// Delete the resource (targets will be deleted automatically)
+		if err := r.deleteResource(ctx, resourceID); err != nil {
+			log.Error(err, "Failed to delete Pangolin resource", "resourceID", resourceID)
+			return err
+		}
+		log.Info("Deleted Pangolin resource", "resourceID", resourceID)
 	}
 
-	log.Info("Deleted Pangolin resource", "resourceID", resourceID)
 	return nil
 }
 
