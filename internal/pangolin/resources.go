@@ -33,6 +33,11 @@ type Target struct {
 	Port         int    `json:"port"`
 	Enabled      bool   `json:"enabled"`
 	HealthStatus string `json:"healthStatus"`
+	// Path and PathMatchType tell apart two targets on one resource that share
+	// a backend: Pangolin routes each as Host() && its path. Empty on targets
+	// created without a path, which route the whole host.
+	Path          string `json:"path"`
+	PathMatchType string `json:"pathMatchType"`
 }
 
 // CreateResourceRequest represents the request to create a resource
@@ -218,7 +223,8 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, req *Upd
 	return &resource, nil
 }
 
-// DeleteResource deletes a resource by ID
+// DeleteResource deletes a resource by ID. A resource that does not exist
+// returns *NotFoundError, so callers can treat it as already deleted.
 func (c *Client) DeleteResource(ctx context.Context, resourceID string) error {
 	resp, err := c.doRequest(ctx, http.MethodDelete, fmt.Sprintf("/v1/resource/%s", resourceID), nil)
 	if err != nil {
@@ -226,7 +232,7 @@ func (c *Client) DeleteResource(ctx context.Context, resourceID string) error {
 	}
 	defer resp.Body.Close()
 
-	return checkResponse(resp)
+	return checkResponseWithNotFound(resp)
 }
 
 // CreateTarget creates a new target for a resource

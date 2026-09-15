@@ -145,7 +145,8 @@ kubectl describe ingress my-app-ingress -n default
 
 You should see:
 - The `pangolin.ingress.k8s.io/finalizer` in the finalizers
-- The `pangolin.ingress.k8s.io/resource-id` annotation with the Pangolin resource ID
+- The `pangolin.ingress.k8s.io/resource-ids` annotation mapping each host to its Pangolin resource ID
+- The `pangolin.ingress.k8s.io/resource-id` annotation with the first host's resource ID
 
 Log in to your Pangolin dashboard and verify that the resource and target were created.
 
@@ -153,20 +154,22 @@ Log in to your Pangolin dashboard and verify that the resource and target were c
 
 ### Resource Creation
 
-When you create an Ingress with `ingressClassName: pangolin`:
+When you create an Ingress with `ingressClassName: pangolin`, for each host on it:
 
 1. The controller parses the host (e.g., `myapp.example.com`) into subdomain (`myapp`) and domain (`example.com`)
 2. Creates a Pangolin HTTP resource with the subdomain and domain
-3. Creates a target pointing to `<service-name>.<namespace>.svc.cluster.local:<port>`
-4. Stores the Pangolin resource ID in the Ingress annotations
+3. Creates one target per path, pointing to `<service-name>.<namespace>.svc.cluster.local:<port>` with the path and its match type
+4. Stores the host's Pangolin resource ID in the Ingress annotations
+
+Targets on the resource that no path declares any more are deleted, and so are the resources of hosts removed from the Ingress.
 
 ### Resource Deletion
 
 When you delete an Ingress:
 
 1. The controller detects the deletion timestamp
-2. Retrieves the Pangolin resource ID from annotations
-3. Deletes the resource from Pangolin (targets are deleted automatically)
+2. Retrieves every Pangolin resource ID from annotations
+3. Deletes the resources from Pangolin (targets are deleted automatically; a resource already gone counts as deleted)
 4. Removes the finalizer to allow Kubernetes to delete the Ingress
 
 ### Target Configuration
@@ -201,7 +204,8 @@ This assumes your Pangolin instance can reach your Kubernetes cluster's internal
 
 | Annotation | Description |
 |------------|-------------|
-| `pangolin.ingress.k8s.io/resource-id` | Stores the Pangolin resource ID (managed by controller) |
+| `pangolin.ingress.k8s.io/resource-ids` | Maps each host to its Pangolin resource ID, as JSON (managed by controller) |
+| `pangolin.ingress.k8s.io/resource-id` | Stores the first host's Pangolin resource ID (managed by controller) |
 
 ### Finalizers
 
