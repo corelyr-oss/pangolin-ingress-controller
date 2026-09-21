@@ -42,7 +42,7 @@ Per Ingress:
    The cache is **refreshed on miss**: a stale list can only ever cause a spurious miss (never a spurious hit), so a host that matches nothing triggers one refetch and a retry before the resolution is declared failed. This lets a domain registered in Pangolin *after* controller startup resolve without a restart. Refetches are rate-limited by `--domain-cache-refresh-interval` (default `60s`, `0` disables), counted from the last *attempt* rather than the last success, so neither many unresolvable Ingresses nor a Pangolin outage can amplify into sustained API load. A failed refetch never discards the existing cache. Cache hits cost no API calls, so steady-state traffic is one fetch per process.
 
    A host that still matches nothing after a refresh yields `errDomainNotFound`. `Reconcile` treats this as an expected, operator-fixable condition: it emits a Warning `DomainNotFound` event on the Ingress and requeues at ~the refresh interval **instead of returning an error**, so it does not ride exponential backoff and does not increment `controller_runtime_reconcile_errors_total`. Callers must wrap the sentinel with `%w` or that behavior silently reverts to a hard error.
-4. **Resource create/update**: If the Ingress already has `pangolin.ingress.k8s.io/resource-id`, it `UpdateResource`s. Otherwise it `CreateResource`s and stores the new ID in the annotation. On `409 Conflict` during create, it _adopts_ the existing Pangolin resource by listing and matching `(subdomain, domainID)` — this is how the controller recovers when its annotation was lost but the Pangolin-side resource still exists.
+4. **Resource create/update**: If the Ingress already has `pangolin.ingress.k8s.io/resource-id`, it `UpdateResource`s. Otherwise it `CreateResource`s and stores the new ID in the annotation. On `409 Conflict` during create, it _adopts_ the existing Pangolin resource by listing and matching `(fullDomain, domainID)` — the listing has no `subdomain` field, and more than one match is refused — this is how the controller recovers when its annotation was lost but the Pangolin-side resource still exists.
 5. **Target reconciliation**: Lists existing targets, finds one matching `(siteID, ip, port)`, and **updates** it in-place; otherwise creates a new one. Any other targets on the resource are deleted as stale. The target IP is always `<service>.<namespace>.svc.cluster.local`. `pathTypeToMatch` maps `Exact`→`exact`, `ImplementationSpecific`→`regex`, default→`prefix`.
 6. **Status**: `updateIngressStatus` writes `status.loadBalancer.ingress[0]` using the cached Site's `proxyIp` if present, otherwise the first rule's `host` as `hostname` (so ArgoCD and similar tools see the Ingress as healthy). Site info is cached in `r.siteCache`, which **is** still restart-to-invalidate — unlike the domain cache, it has no refresh-on-miss path, so a changed `proxyIp` is only picked up on restart.
 
@@ -96,7 +96,7 @@ Deliberate differences from the `Ingress` path, all recorded in
   accepts no `niceId`, so the resource is created with `name` = the derived
   identity, its ID recorded in `.status.resourceId`, then `niceId` set by update
   (Pangolin enforces `niceId` uniqueness). Recovery: recorded ID → `niceId` →
-  `name`, all via `ListAllResources` (page/pageSize; the documented
+  `name`, all via `ListResources` (page/pageSize; the documented
   `GET /org/{orgId}/resource/{niceId}` route does not exist on the live
   server). Never by port.
 - **Proxy-port exclusivity is client-side.** Pangolin accepts two raw resources

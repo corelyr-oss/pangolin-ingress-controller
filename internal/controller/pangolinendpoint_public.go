@@ -119,7 +119,7 @@ func (l *resourceListing) get(ctx context.Context) ([]pangolin.Resource, error) 
 	if l.loaded {
 		return l.resources, nil
 	}
-	resources, err := l.client.ListAllResources(ctx)
+	resources, err := l.client.ListResources(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list Pangolin resources: %w", err)
 	}

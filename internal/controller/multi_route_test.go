@@ -41,6 +41,9 @@ type statefulPangolin struct {
 	targets        map[int]*fakeTarget
 	createdTargets int
 	deletedTargets int
+	// pageCap caps the listing's page size below what the client asks for, so
+	// a resource past the first page is only found by following pagination.
+	pageCap int
 }
 
 type fakeTarget struct {
@@ -133,12 +136,42 @@ func (p *statefulPangolin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.resources[res.ID] = res
 		writeFakeData(w, res)
 
+	// The listing is shaped like the real one: paged by page/pageSize, and
+	// without a subdomain field -- the real listing carries only fullDomain and
+	// domainId. A fake that returned subdomain here is what hid an adopt path
+	// that never matched a subdomain host.
 	case fakeReOrgResources.MatchString(path) && r.Method == http.MethodGet:
-		list := []pangolin.Resource{}
-		for _, res := range p.resources {
-			list = append(list, *res)
+		ids := make([]int, 0, len(p.resources))
+		for id := range p.resources {
+			ids = append(ids, id)
 		}
-		writeFakeData(w, map[string]any{"resources": list})
+		slices.Sort(ids)
+
+		q := r.URL.Query()
+		page, _ := strconv.Atoi(q.Get("page"))
+		page = max(page, 1)
+		size, _ := strconv.Atoi(q.Get("pageSize"))
+		if size <= 0 {
+			size = 20
+		}
+		if p.pageCap > 0 {
+			size = min(size, p.pageCap)
+		}
+		start := min((page-1)*size, len(ids))
+		end := min(start+size, len(ids))
+
+		list := []map[string]any{}
+		for _, id := range ids[start:end] {
+			raw, _ := json.Marshal(p.resources[id])
+			var entry map[string]any
+			_ = json.Unmarshal(raw, &entry)
+			delete(entry, "subdomain")
+			list = append(list, entry)
+		}
+		writeFakeData(w, map[string]any{
+			"resources":  list,
+			"pagination": map[string]int{"total": len(ids), "pageSize": size, "page": page},
+		})
 
 	case fakeReResource.MatchString(path):
 		id := fakePathID(fakeReResource, path)

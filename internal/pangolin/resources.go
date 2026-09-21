@@ -177,33 +177,6 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 	return &resource, nil
 }
 
-// ListResources lists all resources for the configured organization
-func (c *Client) ListResources(ctx context.Context) ([]Resource, error) {
-	resp, err := c.doRequest(ctx, http.MethodGet, fmt.Sprintf("/v1/org/%s/resources", c.orgID), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if err := checkResponse(resp); err != nil {
-		return nil, err
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	var list struct {
-		Resources []Resource `json:"resources"`
-	}
-	if err := decodeData(body, &list); err != nil {
-		return nil, err
-	}
-
-	return list.Resources, nil
-}
-
 // UpdateResource updates an existing resource
 func (c *Client) UpdateResource(ctx context.Context, resourceID string, req *UpdateResourceRequest) (*Resource, error) {
 	resp, err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%s", resourceID), req)
