@@ -54,18 +54,16 @@ func (c *Client) UpdateRawResource(ctx context.Context, resourceID string, req *
 	return decodeResource(resp)
 }
 
-// ListAllResources lists every public resource in the organization, following
-// pagination to the end.
-//
-// ListResources reads a single page, and Pangolin's default page size is 20,
-// so it silently omits resources in a larger organization. That is harmless
-// for a listing used to display but not for one used to decide that something
-// does not exist, which is what identity recovery and the proxy-port check do.
-// This listing either returns everything or returns an error.
+// ListResources lists every public resource in the organization, following
+// pagination to the end. It returns everything or an error, never a partial
+// list: callers use it to decide that a resource does not exist (identity
+// recovery, the proxy-port check, Ingress adoption), and Pangolin's default
+// page size of 20 would otherwise hide most of a larger organization.
 //
 // The endpoint paginates by page and pageSize and rejects limit/offset with a
-// 400, unlike the private-resource listings.
-func (c *Client) ListAllResources(ctx context.Context) ([]Resource, error) {
+// 400, unlike the private-resource listings. Its entries also differ from the
+// resource object: they carry fullDomain and domainId but no subdomain.
+func (c *Client) ListResources(ctx context.Context) ([]Resource, error) {
 	const maxPages = 1000
 
 	var out []Resource

@@ -680,7 +680,7 @@ func (r *IngressReconciler) reconcileHost(ctx context.Context, ingress *networki
 			if pangolin.IsConflict(err) {
 				// Resource already exists in Pangolin — adopt it
 				log.Info("Resource already exists, attempting to adopt", "host", host, "subdomain", subdomain)
-				resource, err = r.findExistingResource(ctx, subdomain, domainID)
+				resource, err = r.findExistingResource(ctx, host, domainID)
 				if err != nil {
 					return fmt.Errorf("failed to adopt existing Pangolin resource for host %s: %w", host, err)
 				}
@@ -1192,21 +1192,46 @@ func intSetsEqual(a, b []int) bool {
 	return true
 }
 
-// findExistingResource searches for an existing Pangolin resource matching the
-// given subdomain and domainID. This is used to adopt resources that already
-// exist when a create returns 409 Conflict.
-func (r *IngressReconciler) findExistingResource(ctx context.Context, subdomain, domainID string) (*pangolin.Resource, error) {
+// findExistingResource finds the Pangolin resource for host after a create was
+// refused as a conflict, so the Ingress can adopt it.
+//
+// It matches on (fullDomain, domainId) because that is what the listing
+// carries: the listing has no subdomain field, so matching on subdomain never
+// found a subdomain host, and matched an apex host against whichever resource
+// on the domain came first. fullDomain is exactly the host, since Pangolin
+// builds it from the subdomain and domain the host was split into.
+//
+// More than one match is refused rather than resolved by picking one: that
+// would reprogram a resource this Ingress may not own.
+func (r *IngressReconciler) findExistingResource(ctx context.Context, host, domainID string) (*pangolin.Resource, error) {
 	resources, err := r.PangolinClient.ListResources(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list resources: %w", err)
 	}
-	for i := range resources {
-		res := &resources[i]
-		if res.Subdomain == subdomain && res.DomainID == domainID {
-			return res, nil
+
+	var matches []pangolin.Resource
+	for _, res := range resources {
+		if res.ProxyPort != 0 || res.Mode == "tcp" || res.Mode == "udp" {
+			continue
+		}
+		if strings.EqualFold(res.FullDomain, host) && res.DomainID == domainID {
+			matches = append(matches, res)
 		}
 	}
-	return nil, fmt.Errorf("could not find existing resource with subdomain %q and domainID %q", subdomain, domainID)
+
+	switch len(matches) {
+	case 1:
+		return &matches[0], nil
+	case 0:
+		return nil, fmt.Errorf("could not find existing resource for host %q in domain %q", host, domainID)
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, m := range matches {
+			ids = append(ids, strconv.Itoa(m.ID))
+		}
+		return nil, fmt.Errorf("refusing to adopt: %d resources (%s) serve host %q in domain %q",
+			len(matches), strings.Join(ids, ", "), host, domainID)
+	}
 }
 
 // deletePangolinResources deletes every Pangolin resource the Ingress owns: one
