@@ -22,6 +22,11 @@ type Resource struct {
 	Protocol      string `json:"protocol"`
 	Enabled       bool   `json:"enabled"`
 	StickySession bool   `json:"stickySession"`
+	// Mode is the resource kind: "http", or "tcp"/"udp" for a raw resource.
+	Mode string `json:"mode"`
+	// ProxyPort is the public entrypoint port of a raw resource; zero (null on
+	// the wire) for an HTTP resource.
+	ProxyPort int `json:"proxyPort"`
 }
 
 // Target represents a backend target for a resource
@@ -146,7 +151,8 @@ func (c *Client) CreateResource(ctx context.Context, req *CreateResourceRequest)
 	return &resource, nil
 }
 
-// GetResource retrieves a resource by ID
+// GetResource retrieves a resource by ID. A resource that does not exist
+// returns *NotFoundError.
 func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource, error) {
 	resp, err := c.doRequest(ctx, http.MethodGet, fmt.Sprintf("/v1/resource/%s", resourceID), nil)
 	if err != nil {
@@ -154,7 +160,7 @@ func (c *Client) GetResource(ctx context.Context, resourceID string) (*Resource,
 	}
 	defer resp.Body.Close()
 
-	if err := checkResponse(resp); err != nil {
+	if err := checkResponseWithNotFound(resp); err != nil {
 		return nil, err
 	}
 

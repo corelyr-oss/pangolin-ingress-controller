@@ -70,7 +70,7 @@ func issuef(condition, reason, format string, args ...interface{}) *endpointIssu
 }
 
 // PangolinEndpointReconciler reconciles a PangolinEndpoint into a Pangolin
-// private resource.
+// private resource or, for spec.public, a raw public resource.
 type PangolinEndpointReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
@@ -132,8 +132,8 @@ func (r *PangolinEndpointReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if !controllerutil.ContainsFinalizer(ep, pangolinFinalizerName) {
 			return ctrl.Result{}, nil
 		}
-		if err := r.deleteSiteResource(ctx, ep); err != nil {
-			log.Error(err, "Failed to delete Pangolin private resource")
+		if err := r.deleteEndpoint(ctx, ep); err != nil {
+			log.Error(err, "Failed to delete Pangolin resource")
 			return ctrl.Result{}, err
 		}
 		controllerutil.RemoveFinalizer(ep, pangolinFinalizerName)
@@ -189,12 +189,16 @@ func (r *PangolinEndpointReconciler) Reconcile(ctx context.Context, req ctrl.Req
 // reconcileEndpoint resolves the desired state and converges Pangolin onto it,
 // recording observed values on ep.Status. Conditions are set by the caller.
 func (r *PangolinEndpointReconciler) reconcileEndpoint(ctx context.Context, ep *v1alpha1.PangolinEndpoint) error {
+	if ep.Spec.Public != nil {
+		return r.reconcilePublic(ctx, ep)
+	}
+
 	private := ep.Spec.Private
 	if private == nil {
 		// The CRD's CEL validation rejects this, so reaching it means the CRD
 		// in the cluster is older than this binary.
 		return issuef(v1alpha1.ConditionAccepted, v1alpha1.ReasonUnsupportedByServer,
-			"spec.private is required; the installed CRD may predate this controller version")
+			"one of spec.private or spec.public is required; the installed CRD may predate this controller version")
 	}
 
 	niceID, err := r.niceIDFor(ep)
@@ -527,6 +531,16 @@ func (r *PangolinEndpointReconciler) findSiteResource(ctx context.Context, ep *v
 	return nil, fmt.Errorf("failed to look up Pangolin private resource by nice ID %q: %w", ep.Status.NiceID, err)
 }
 
+// deleteEndpoint deletes whatever Pangolin object the endpoint recorded. It
+// dispatches on the recorded identifier rather than on the spec, since the
+// identifier is what says which kind of object exists.
+func (r *PangolinEndpointReconciler) deleteEndpoint(ctx context.Context, ep *v1alpha1.PangolinEndpoint) error {
+	if ep.Status.ResourceID != "" {
+		return r.deletePublicResource(ctx, ep)
+	}
+	return r.deleteSiteResource(ctx, ep)
+}
+
 func (r *PangolinEndpointReconciler) deleteSiteResource(ctx context.Context, ep *v1alpha1.PangolinEndpoint) error {
 	log := log.FromContext(ctx)
 
@@ -767,10 +781,14 @@ func (r *PangolinEndpointReconciler) applyIssue(ep *v1alpha1.PangolinEndpoint, i
 func (r *PangolinEndpointReconciler) updateStatus(ctx context.Context, ep *v1alpha1.PangolinEndpoint, reconcileOK bool) error {
 	ep.Status.ObservedGeneration = ep.Generation
 
-	if ep.Status.SiteResourceID != "" && reconcileOK {
+	if (ep.Status.SiteResourceID != "" || ep.Status.ResourceID != "") && reconcileOK {
+		kind := "private"
+		if ep.Spec.Public != nil {
+			kind = "public"
+		}
 		setCondition(ep, v1alpha1.ConditionAccepted, metav1.ConditionTrue, v1alpha1.ReasonReconciled, "spec accepted")
 		setCondition(ep, v1alpha1.ConditionResolvedRefs, metav1.ConditionTrue, v1alpha1.ReasonReconciled, "all references resolved")
-		setCondition(ep, v1alpha1.ConditionProgrammed, metav1.ConditionTrue, v1alpha1.ReasonReconciled, "Pangolin private resource is up to date")
+		setCondition(ep, v1alpha1.ConditionProgrammed, metav1.ConditionTrue, v1alpha1.ReasonReconciled, "Pangolin "+kind+" resource is up to date")
 
 		if grantsNoPrincipals(ep) {
 			// Pangolin attaches the organisation's admin role to every private
@@ -779,6 +797,8 @@ func (r *PangolinEndpointReconciler) updateStatus(ctx context.Context, ep *v1alp
 			setCondition(ep, v1alpha1.ConditionReady, metav1.ConditionFalse, v1alpha1.ReasonNoPrincipalsGranted,
 				"endpoint names no client, role or user; only organisation administrators can reach it "+
 					"through the role Pangolin grants implicitly")
+		} else if ep.Spec.Public != nil {
+			setCondition(ep, v1alpha1.ConditionReady, metav1.ConditionTrue, v1alpha1.ReasonReconciled, "public port is programmed")
 		} else {
 			setCondition(ep, v1alpha1.ConditionReady, metav1.ConditionTrue, v1alpha1.ReasonReconciled, "endpoint is reachable by its principals")
 		}
@@ -790,7 +810,13 @@ func (r *PangolinEndpointReconciler) updateStatus(ctx context.Context, ep *v1alp
 	return nil
 }
 
+// grantsNoPrincipals reports a private endpoint that names no principal. A
+// public raw resource has no access control in Pangolin, so the question does
+// not arise for it.
 func grantsNoPrincipals(ep *v1alpha1.PangolinEndpoint) bool {
+	if ep.Spec.Private == nil {
+		return false
+	}
 	access := ep.Spec.Private.Access
 	if access == nil {
 		return true

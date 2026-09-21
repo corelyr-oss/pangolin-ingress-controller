@@ -67,11 +67,16 @@ annotation naming a Kubernetes API review. The annotation prefix on the
 `Ingress` path is unaffected — that rule applies to API groups, not annotation
 keys — so the two intentionally differ.
 
-`PangolinEndpoint` covers Pangolin **private resources**
-(mesh-only endpoints, called *site resources* in the older API surface), which
-cannot be modelled as an `Ingress`: no public hostname, no TLS, no HTTP
-semantics, and mandatory access control. It is a second, independent reconciler
-— the `Ingress` path is untouched and the two share only the API client.
+`PangolinEndpoint` covers two kinds of Pangolin resource that cannot be
+modelled as an `Ingress`: **private resources** (`spec.private`; mesh-only
+endpoints, called *site resources* in the older API surface — no public
+hostname, mandatory access control) and **public raw TCP/UDP resources**
+(`spec.public`; a proxy port forwarded with no TLS termination or HTTP
+semantics). Exactly one branch is set, enforced by CEL, and the branch and
+`public.protocol` are immutable. It is a second, independent reconciler — the
+`Ingress` path is untouched and the two share only the API client. The public
+branch lives in `internal/controller/pangolinendpoint_public.go`
+(`openspec/changes/add-public-raw-endpoint/design.md`).
 
 Deliberate differences from the `Ingress` path, all recorded in
 `openspec/changes/add-private-endpoint-crd/design.md`:
@@ -87,9 +92,16 @@ Deliberate differences from the `Ingress` path, all recorded in
 - **`mode` is hardcoded to `host`** and not exposed, because `backendRef` is
   always a Service. This is what keeps `scheme`, `ssl`, `authDaemon*`,
   `pamMode`, `domainId` and `subdomain` out of the API.
-- **`spec.public` is declared but rejected** by CEL. It has to exist as a field
-  to be rejected at all — a structural schema prunes undeclared fields
-  silently.
+- **Public identity is create-named, then nice-ID'd.** Raw-resource create
+  accepts no `niceId`, so the resource is created with `name` = the derived
+  identity, its ID recorded in `.status.resourceId`, then `niceId` set by update
+  (Pangolin enforces `niceId` uniqueness). Recovery: recorded ID → `niceId` →
+  `name`, all via `ListAllResources` (page/pageSize; the documented
+  `GET /org/{orgId}/resource/{niceId}` route does not exist on the live
+  server). Never by port.
+- **Proxy-port exclusivity is client-side.** Pangolin accepts two raw resources
+  on one `(mode, proxyPort)`; the controller refuses with `ProxyPortInUse`
+  before create and before a port change.
 
 Two invariants that are easy to break:
 
