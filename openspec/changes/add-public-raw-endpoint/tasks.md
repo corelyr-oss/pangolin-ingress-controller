@@ -37,5 +37,5 @@
 
 - [x] 5.1 README: public branch, spec shape, host-side entrypoint prerequisite
 - [x] 5.2 CLAUDE.md: `spec.public` is no longer rejected
-- [ ] 5.3 Chart version / appVersion bump (separate release commit, after merge)
+- [x] 5.3 Chart version / appVersion bump (separate release commit, after merge)
 - [ ] 5.4 Follow-up change for the unpaginated `ListResources` on the Ingress adopt path (not in this change)
