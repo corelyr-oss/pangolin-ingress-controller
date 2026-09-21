@@ -71,6 +71,11 @@ name. An endpoint that names no clients does not need **List Clients**, and a
 missing lookup permission surfaces as `ResolvedRefs=False` on the object rather
 than as a silent failure.
 
+### Required for `PangolinEndpoint` (public raw TCP/UDP endpoints)
+
+The Resource and Target permissions listed under **Required** cover this branch;
+no further permissions are needed.
+
 ### Required only for the auth-method annotations
 
 | Group | Permission | Needed for |
@@ -501,17 +506,25 @@ spec:
               number: 8080
 ```
 
-## PangolinEndpoint (private endpoints)
+## PangolinEndpoint (private and public raw endpoints)
 
 An `Ingress` can only describe an HTTP resource reachable at a public hostname.
-Pangolin also supports **private resources** — endpoints with no public
-entrypoint at all, reachable only by clients connected to the Pangolin mesh at
-an internal FQDN. Those are declared with the `PangolinEndpoint` custom
-resource.
+Pangolin also supports two kinds of resource that do not fit that shape, and
+both are declared with the `PangolinEndpoint` custom resource:
+
+- **Private resources** (`spec.private`) — endpoints with no public entrypoint
+  at all, reachable only by clients connected to the Pangolin mesh at an
+  internal FQDN.
+- **Public raw TCP/UDP ports** (`spec.public`) — a port on Pangolin's public
+  entrypoint forwarded to a Service with no TLS termination and no HTTP
+  handling, e.g. for a service that runs its own mutual TLS. See
+  [Public raw endpoints](#public-raw-endpoints).
+
+Exactly one of the two blocks must be set, and an existing object cannot switch
+between them — delete and recreate it instead.
 
 > **Alpha.** `pangolin.corelyr.com/v1alpha1` may change in
-> backwards-incompatible ways. Only the private branch is implemented;
-> `spec.public` is reserved and rejected.
+> backwards-incompatible ways.
 
 ```yaml
 apiVersion: pangolin.corelyr.com/v1alpha1
@@ -587,19 +600,72 @@ only TCP and UDP.
 |-----------|---------------|
 | `Accepted` | The spec cannot be acted on: no alias suffix configured, an identity that Pangolin cannot express, or an instance that does not implement private resources |
 | `ResolvedRefs` | Something the spec points at is missing or ambiguous: the Service, a site, or a named role/user/client |
-| `Programmed` | Pangolin rejected, or has not yet accepted, the configuration |
+| `Programmed` | Pangolin rejected, or has not yet accepted, the configuration. `ProxyPortInUse` means another raw resource holds a public endpoint's port |
 | `Ready` | Summary. `NoPrincipalsGranted` means the endpoint exists but grants access to nobody |
 
 All four are operator-fixable conditions: they are reported as events and
 requeued rather than returned as controller errors, so they do not ride
 exponential backoff or inflate `controller_runtime_reconcile_errors_total`.
 
+### Public raw endpoints
+
+```yaml
+apiVersion: pangolin.corelyr.com/v1alpha1
+kind: PangolinEndpoint
+metadata:
+  name: grpc
+  namespace: parley
+spec:
+  backendRef:
+    name: parley-nodes        # Service in the same namespace
+  public:
+    protocol: TCP             # TCP (default) or UDP; immutable
+    proxyPort: 7443           # public port on the Pangolin entrypoint
+    servicePort: 7443         # Service port to forward to; defaults to proxyPort
+```
+
+Each object is one Pangolin raw resource with one protocol and one proxy port;
+expose two ports with two objects. The controller creates one target per site
+(`siteRefs`, or `--pangolin-site-nice-id`) pointing at
+`<service>.<namespace>.svc.cluster.local:<servicePort>`, and removes any other
+target on the resource. `.status.resourceId` records the Pangolin resource and
+`.status.resolvedPorts` shows the proxy port.
+
+| Field | Description |
+|-------|-------------|
+| `public.protocol` | `TCP` or `UDP`. Defaults to `TCP`. Immutable, because Pangolin cannot change a raw resource's mode |
+| `public.proxyPort` | Public port on the Pangolin entrypoint. Required |
+| `public.servicePort` | Port of the backing Service. Defaults to `proxyPort`. Must be a Service port with the same protocol, otherwise `ResolvedRefs=False` / `BackendUnsupported` |
+
+**Prerequisites on the Pangolin host.** The controller only creates the
+Pangolin resource. The port itself must already exist on the Pangolin host:
+raw resources enabled (`flags.allow_raw_resources: true`), a Traefik
+entrypoint for the port (named `tcp-<port>` or `udp-<port>`), and the port
+published through Gerbil. None of that is visible through Pangolin's API.
+Without it, Pangolin accepts the resource and traffic goes nowhere.
+
+**Port exclusivity.** Pangolin will accept two raw resources on the same
+protocol and port, but the entrypoint can route to only one of them. The
+controller therefore refuses a port that another raw resource already holds,
+reporting `Programmed=False` with reason `ProxyPortInUse` and naming the holder.
+It never takes over the holder. The same port on the other protocol is allowed.
+
+Raw resources have no access control in Pangolin: there is no `access` block,
+and anything that can reach the port can connect. Authentication is the
+backend's job.
+
 ### Identity
 
 The controller derives a deterministic Pangolin `niceId` of
 `<resource-prefix>-<namespace>-<name>` and re-finds its resource by that ID if
 `.status` is lost. It never claims a Pangolin resource by matching attributes,
-so it cannot adopt one it does not own. A name that cannot be expressed as a
+so it cannot adopt one it does not own.
+
+Pangolin does not accept a `niceId` when a public raw resource is created. For
+those, the controller sets the resource's `name` to the same value at create
+time, records the new ID in `.status.resourceId`, and then sets the `niceId`.
+If the process dies between create and recording the ID, the next reconcile
+finds the resource by that `name`. It is never found by its port. A name that cannot be expressed as a
 nice ID (anything outside `[a-zA-Z0-9-]`, e.g. a dot in the object name) is
 refused rather than rewritten, since rewriting could collapse two endpoints
 onto one identity.

@@ -49,6 +49,7 @@ const (
 	ReasonUnsupportedByServer      = "UnsupportedByServer"
 	ReasonBackendNotFound          = "BackendNotFound"
 	ReasonBackendUnsupported       = "BackendUnsupported"
+	ReasonProxyPortInUse           = "ProxyPortInUse"
 	ReasonSiteNotFound             = "SiteNotFound"
 	ReasonPrincipalNotFound        = "PrincipalNotFound"
 	ReasonPrincipalAmbiguous       = "PrincipalAmbiguous"
@@ -168,20 +169,43 @@ type PrivateEndpointSpec struct {
 	DisableICMP *bool `json:"disableIcmp,omitempty"`
 }
 
-// PublicEndpointSpec is reserved for the public raw TCP/UDP branch and is
-// rejected in v1alpha1.
+// PublicEndpointSpec describes a raw TCP or UDP port on Pangolin's public
+// entrypoint, forwarded to the backing Service without TLS termination or any
+// HTTP handling. One object is one Pangolin raw resource, which has exactly one
+// protocol and one proxy port; two ports are two objects.
 //
-// Pangolin's public-resource create accepts no caller-supplied niceId, so a
-// resource whose recorded ID is lost can only be re-found by matching its
-// proxy port -- which is indistinguishable from another owner having taken
-// that port. Claiming a resource on that basis would be a hijack, so the
-// branch is deferred until it has a safe identity model.
-type PublicEndpointSpec struct{}
+// The proxy port must also exist as an entrypoint on the Pangolin host (a
+// Traefik TCP/UDP entrypoint and a Gerbil port mapping). That is host
+// configuration the controller cannot create or check: without it Pangolin
+// accepts the resource and traffic goes nowhere.
+//
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.protocol) || !has(self.protocol) || self.protocol == oldSelf.protocol",message="spec.public.protocol is immutable: Pangolin cannot change a raw resource's mode; delete and recreate the endpoint"
+type PublicEndpointSpec struct {
+	// Protocol of the proxy port.
+	// +kubebuilder:default=TCP
+	// +optional
+	Protocol Protocol `json:"protocol,omitempty"`
+
+	// ProxyPort is the public port on the Pangolin entrypoint. Pangolin does
+	// not keep two raw resources off the same port, so the controller refuses
+	// a port another raw resource of the same protocol already holds.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	ProxyPort int32 `json:"proxyPort"`
+
+	// ServicePort is the port of the backing Service that traffic is forwarded
+	// to. Defaults to ProxyPort. It must be a port the Service exposes with the
+	// same protocol.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	ServicePort *int32 `json:"servicePort,omitempty"`
+}
 
 // PangolinEndpointSpec defines the desired state of a PangolinEndpoint.
 //
-// +kubebuilder:validation:XValidation:rule="has(self.private)",message="spec.private is required: v1alpha1 implements the private branch only"
-// +kubebuilder:validation:XValidation:rule="!has(self.public)",message="spec.public is reserved: the public raw TCP/UDP branch is not implemented in v1alpha1"
+// +kubebuilder:validation:XValidation:rule="has(self.private) != has(self.public)",message="exactly one of spec.private or spec.public must be set"
+// +kubebuilder:validation:XValidation:rule="has(self.public) == has(oldSelf.public)",message="spec.private and spec.public cannot be switched in place: they are different Pangolin resource types; delete and recreate the endpoint"
 type PangolinEndpointSpec struct {
 	// BackendRef selects the Service that backs this endpoint.
 	BackendRef BackendReference `json:"backendRef"`
@@ -195,11 +219,13 @@ type PangolinEndpointSpec struct {
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// Private declares a mesh-only endpoint. Required in v1alpha1.
+	// Private declares a mesh-only endpoint. Exactly one of Private or Public
+	// must be set.
 	// +optional
 	Private *PrivateEndpointSpec `json:"private,omitempty"`
 
-	// Public is reserved and rejected in v1alpha1.
+	// Public declares a raw TCP/UDP port on Pangolin's public entrypoint.
+	// Exactly one of Private or Public must be set.
 	// +optional
 	Public *PublicEndpointSpec `json:"public,omitempty"`
 }
@@ -219,9 +245,15 @@ type ResolvedPorts struct {
 
 // PangolinEndpointStatus defines the observed state of a PangolinEndpoint.
 type PangolinEndpointStatus struct {
-	// SiteResourceID is the Pangolin identifier of the private resource.
+	// SiteResourceID is the Pangolin identifier of the private resource. Set
+	// for spec.private only.
 	// +optional
 	SiteResourceID string `json:"siteResourceId,omitempty"`
+
+	// ResourceID is the Pangolin identifier of the public raw resource. Set
+	// for spec.public only.
+	// +optional
+	ResourceID string `json:"resourceId,omitempty"`
 
 	// NiceID is the deterministic Pangolin nice ID derived from this object's
 	// namespace and name. It is the controller's identity for the endpoint and
@@ -258,8 +290,9 @@ type PangolinEndpointStatus struct {
 }
 
 // PangolinEndpoint is a Pangolin resource that cannot be expressed as an
-// Ingress: it has no public hostname, no TLS to terminate and no HTTP
-// semantics, and its access control is mandatory rather than optional.
+// Ingress: either a private (mesh-only) resource, which has no public hostname
+// and mandatory access control, or a public raw TCP/UDP port, which has no TLS
+// to terminate and no HTTP semantics.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

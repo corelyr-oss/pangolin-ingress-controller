@@ -38,8 +38,9 @@ spec:
       openAPIV3Schema:
         description: |-
           PangolinEndpoint is a Pangolin resource that cannot be expressed as an
-          Ingress: it has no public hostname, no TLS to terminate and no HTTP
-          semantics, and its access control is mandatory rather than optional.
+          Ingress: either a private (mesh-only) resource, which has no public hostname
+          and mandatory access control, or a public raw TCP/UDP port, which has no TLS
+          to terminate and no HTTP semantics.
         properties:
           apiVersion:
             description: |-
@@ -76,7 +77,9 @@ spec:
                   Defaults to true.
                 type: boolean
               private:
-                description: Private declares a mesh-only endpoint. Required in v1alpha1.
+                description: |-
+                  Private declares a mesh-only endpoint. Exactly one of Private or Public
+                  must be set.
                 properties:
                   access:
                     description: Access names the principals permitted to reach the
@@ -184,8 +187,43 @@ spec:
                     type: array
                 type: object
               public:
-                description: Public is reserved and rejected in v1alpha1.
+                description: |-
+                  Public declares a raw TCP/UDP port on Pangolin's public entrypoint.
+                  Exactly one of Private or Public must be set.
+                properties:
+                  protocol:
+                    default: TCP
+                    description: Protocol of the proxy port.
+                    enum:
+                    - TCP
+                    - UDP
+                    type: string
+                  proxyPort:
+                    description: |-
+                      ProxyPort is the public port on the Pangolin entrypoint. Pangolin does
+                      not keep two raw resources off the same port, so the controller refuses
+                      a port another raw resource of the same protocol already holds.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  servicePort:
+                    description: |-
+                      ServicePort is the port of the backing Service that traffic is forwarded
+                      to. Defaults to ProxyPort. It must be a port the Service exposes with the
+                      same protocol.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                required:
+                - proxyPort
                 type: object
+                x-kubernetes-validations:
+                - message: 'spec.public.protocol is immutable: Pangolin cannot change
+                    a raw resource''s mode; delete and recreate the endpoint'
+                  rule: '!has(oldSelf.protocol) || !has(self.protocol) || self.protocol
+                    == oldSelf.protocol'
               siteRefs:
                 description: |-
                   SiteRefs are the Pangolin site nice IDs to attach the endpoint to. When
@@ -197,12 +235,12 @@ spec:
             - backendRef
             type: object
             x-kubernetes-validations:
-            - message: 'spec.private is required: v1alpha1 implements the private
-                branch only'
-              rule: has(self.private)
-            - message: 'spec.public is reserved: the public raw TCP/UDP branch is
-                not implemented in v1alpha1'
-              rule: '!has(self.public)'
+            - message: exactly one of spec.private or spec.public must be set
+              rule: has(self.private) != has(self.public)
+            - message: 'spec.private and spec.public cannot be switched in place:
+                they are different Pangolin resource types; delete and recreate the
+                endpoint'
+              rule: has(self.public) == has(oldSelf.public)
           status:
             description: PangolinEndpointStatus defines the observed state of a PangolinEndpoint.
             properties:
@@ -299,9 +337,15 @@ spec:
                     description: UDP is the resolved UDP port range string.
                     type: string
                 type: object
+              resourceId:
+                description: |-
+                  ResourceID is the Pangolin identifier of the public raw resource. Set
+                  for spec.public only.
+                type: string
               siteResourceId:
-                description: SiteResourceID is the Pangolin identifier of the private
-                  resource.
+                description: |-
+                  SiteResourceID is the Pangolin identifier of the private resource. Set
+                  for spec.private only.
                 type: string
             type: object
         type: object
